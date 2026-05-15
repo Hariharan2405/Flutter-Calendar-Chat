@@ -1,0 +1,31 @@
+{
+  "functions": {
+    "source": "functions"
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "storage": {
+    "rules": "storage.rules"
+  },
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "calendar-bc279",
+          "appId": "1:953075447228:android:887bd1f688e139be49a7b9",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "calendar-bc279",
+          "configurations": {
+            "android": "1:953075447228:android:887bd1f688e139be49a7b9"
+          }
+        }
+      }
+    }
+  }
+}

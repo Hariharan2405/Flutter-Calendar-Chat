@@ -1,0 +1,11 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// IMPORTANT: Replace this file with your actual google-services.json
+//
+// How to get google-services.json:
+//   1. Go to https://console.firebase.google.com
+//   2. Select your project → Project Settings → General
+//   3. Under "Your apps", add an Android app with package name:
+//      com.example.calendar_app
+//   4. Download google-services.json and place it in this folder:
+//      android/app/google-services.json   (rename, removing .placeholder)
+// ─────────────────────────────────────────────────────────────────────────────

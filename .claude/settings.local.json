@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem \"c:\\\\Users\\\\HariharanGopalakrish\\\\Calendar\" -Recurse | Where-Object { !$_.PSIsContainer } | Select-Object FullName | ForEach-Object { $_.FullName.Replace\\(\"c:\\\\Users\\\\HariharanGopalakrish\\\\Calendar\\\\\", \"\"\\) })"
+    ]
+  }
+}

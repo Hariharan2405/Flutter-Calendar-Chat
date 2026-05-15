@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "953075447228",
+    "project_id": "calendar-bc279",
+    "storage_bucket": "calendar-bc279.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:953075447228:android:887bd1f688e139be49a7b9",
+        "android_client_info": {
+          "package_name": "com.example.calendar_app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "953075447228-dvqfr1ck5soi89h6b4sg1hgv4p5pakm0.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBcPS9ShVeczBoRbT6infaJsV2HSGEPKl8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "953075447228-dvqfr1ck5soi89h6b4sg1hgv4p5pakm0.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
