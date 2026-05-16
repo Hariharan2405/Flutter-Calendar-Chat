@@ -7,7 +7,7 @@ class NotificationService {
       FlutterLocalNotificationsPlugin();
 
   static const _channelId = 'tn_calendar_chat';
-  static const _channelName = 'TN Calendar';
+  static const _channelName = 'Calendar';
 
   static Future<void> init() async {
     const android = AndroidInitializationSettings('@drawable/ic_launcher');
@@ -40,12 +40,12 @@ class NotificationService {
 
   // Called by Firestore listener when app is in foreground
   static Future<void> showNewMessage() async {
-    await _show('TN Calendar', 'You have a new message');
+    await _show('Calendar', 'You have a new message');
   }
 
   // Called by FCM handler (foreground / background / killed)
   static Future<void> showFcmNotification(RemoteMessage message) async {
-    final title = message.notification?.title ?? 'TN Calendar';
+    final title = message.notification?.title ?? 'Calendar';
     final body = message.notification?.body ?? 'You have a new message';
     await _show(title, body);
   }

@@ -9,18 +9,18 @@ const REMINDER_MESSAGES = [
   "Don't forget to note your expenses today! 💰",
   "Leave ahead, make a plan — check your calendar. 🗓️",
   "Small savings today, big dreams tomorrow. 📈",
-  "Have you planned your week yet? Open TN Calendar! 📋",
+  "Have you planned your week yet? Open Calendar! 📋",
   "A little note now saves a lot of confusion later. 📝",
   "Track your spending, control your future. 💡",
   "Your calendar is waiting — what's on for today? ☀️",
   "Don't let expenses pile up — log them now! 🧾",
-  "Plan smart, live better. Open TN Calendar. 🌟",
+  "Plan smart, live better. Open Calendar. 🌟",
   "A quick note a day keeps the budget on track. 🎯",
   "Check your Tamil Nadu holidays — plan your next break! 🎉",
   "Have you reviewed last month's expenses? 📊",
   "Stay organised, stay stress-free. 🧘",
   "New day, new plan — open your calendar! 🌅",
-  "Every rupee counts — track it with TN Calendar. ₹",
+  "Every rupee counts — track it with Calendar. ₹",
 ];
 
 function randomMessage() {
@@ -65,7 +65,7 @@ exports.sendChatNotification = onDocumentCreated(
       await getMessaging().send({
         token: fcmToken,
         notification: {
-          title: 'TN Calendar',
+          title: 'Calendar',
           body: randomMessage(),
         },
         android: {

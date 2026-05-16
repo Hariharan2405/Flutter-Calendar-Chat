@@ -40,7 +40,7 @@ class MyApp extends StatelessWidget {
     return ChangeNotifierProvider(
       create: (_) => AppProvider()..initialize(),
       child: MaterialApp(
-        title: 'TN Calendar',
+        title: 'Calendar',
         theme: AppTheme.lightTheme,
         debugShowCheckedModeBanner: false,
         home: const AppShell(),
