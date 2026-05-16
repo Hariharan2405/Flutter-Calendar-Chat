@@ -26,8 +26,8 @@ void main() async {
   await NotificationService.init();
   await NotificationService.requestPermission();
 
-  // Show local notification for FCM messages while app is in foreground
-  FirebaseMessaging.onMessage.listen(NotificationService.showFcmNotification);
+  // Foreground notifications are handled by the Firestore listener in AppProvider.
+  // onMessage is intentionally not wired here to avoid duplicates.
 
   runApp(const MyApp());
 }

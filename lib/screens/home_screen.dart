@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../providers/app_provider.dart';
+import '../services/chat_service.dart';
 import '../constants/app_theme.dart';
 import '../widgets/calendar_widget.dart';
 import '../widgets/notes_section.dart';
@@ -17,6 +18,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
   late TabController _tabCtrl;
   bool _profileDialogShown = false;
+  final ChatService _chatService = ChatService();
 
   @override
   void initState() {
@@ -136,6 +138,17 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     }
                     if (pass != confirm) {
                       setLocal(() => error = 'Passwords do not match.');
+                      return;
+                    }
+                    final existing = await _chatService.findProfileByName(name);
+                    if (existing != null) {
+                      if (existing.password != pass) {
+                        setLocal(() => error = 'Incorrect password for this name.');
+                        return;
+                      }
+                      // Name + password match → login without creating a duplicate
+                      await provider.loginWithExistingProfile(existing);
+                      if (ctx.mounted) Navigator.pop(ctx);
                       return;
                     }
                     await provider.createProfile(name, pass);

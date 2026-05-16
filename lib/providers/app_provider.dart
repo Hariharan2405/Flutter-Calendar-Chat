@@ -111,6 +111,19 @@ class AppProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> loginWithExistingProfile(UserProfileModel existing) async {
+    _profile = existing;
+    notifyListeners();
+    // Update FCM token on the existing profile doc so this device gets notifications
+    final token = await NotificationService.getToken();
+    if (token != null) {
+      await FirebaseFirestore.instance
+          .collection('user_profiles')
+          .doc(existing.uid)
+          .update({'fcmToken': token});
+    }
+  }
+
   Future<void> _refreshMetadata() async {
     _datesWithNotes = await _notesService.getDatesWithNotes(_userId!);
     _datesWithExpenses = await _expenseService.getDatesWithExpenses(_userId!);

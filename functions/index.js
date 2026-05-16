@@ -5,10 +5,31 @@ const { getMessaging } = require('firebase-admin/messaging');
 
 initializeApp();
 
+const REMINDER_MESSAGES = [
+  "Don't forget to note your expenses today! 💰",
+  "Leave ahead, make a plan — check your calendar. 🗓️",
+  "Small savings today, big dreams tomorrow. 📈",
+  "Have you planned your week yet? Open TN Calendar! 📋",
+  "A little note now saves a lot of confusion later. 📝",
+  "Track your spending, control your future. 💡",
+  "Your calendar is waiting — what's on for today? ☀️",
+  "Don't let expenses pile up — log them now! 🧾",
+  "Plan smart, live better. Open TN Calendar. 🌟",
+  "A quick note a day keeps the budget on track. 🎯",
+  "Check your Tamil Nadu holidays — plan your next break! 🎉",
+  "Have you reviewed last month's expenses? 📊",
+  "Stay organised, stay stress-free. 🧘",
+  "New day, new plan — open your calendar! 🌅",
+  "Every rupee counts — track it with TN Calendar. ₹",
+];
+
+function randomMessage() {
+  return REMINDER_MESSAGES[Math.floor(Math.random() * REMINDER_MESSAGES.length)];
+}
+
 /**
  * Fires when a new message is created in chats/{chatId}/messages/{messageId}.
- * Sends an FCM push to the recipient so they get notified even when the app
- * is in the background or killed.
+ * Sends a random reminder notification instead of the real message content.
  */
 exports.sendChatNotification = onDocumentCreated(
   'chats/{chatId}/messages/{messageId}',
@@ -30,15 +51,6 @@ exports.sendChatNotification = onDocumentCreated(
     const recipientId = participants.find((uid) => uid !== senderId);
     if (!recipientId) return;
 
-    // Get sender's display name (description) for the notification body
-    const senderDoc = await getFirestore()
-      .collection('user_profiles')
-      .doc(senderId)
-      .get();
-    const senderName = senderDoc.exists
-      ? (senderDoc.data().description ?? senderDoc.data().name ?? 'Someone')
-      : 'Someone';
-
     // Get recipient's FCM token
     const recipientDoc = await getFirestore()
       .collection('user_profiles')
@@ -49,18 +61,12 @@ exports.sendChatNotification = onDocumentCreated(
     const fcmToken = recipientDoc.data().fcmToken;
     if (!fcmToken) return;
 
-    // Build notification body
-    const isVoice = message.type === 'voice';
-    const body = isVoice
-      ? `${senderName} sent a voice message`
-      : `${senderName}: ${message.text ?? 'New message'}`;
-
     try {
       await getMessaging().send({
         token: fcmToken,
         notification: {
           title: 'TN Calendar',
-          body: body,
+          body: randomMessage(),
         },
         android: {
           notification: {
@@ -75,7 +81,6 @@ exports.sendChatNotification = onDocumentCreated(
         },
       });
     } catch (err) {
-      // Token may be stale — remove it so we don't retry with a dead token
       if (
         err.code === 'messaging/invalid-registration-token' ||
         err.code === 'messaging/registration-token-not-registered'

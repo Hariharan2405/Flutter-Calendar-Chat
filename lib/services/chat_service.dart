@@ -19,6 +19,17 @@ class ChatService {
     return UserProfileModel.fromFirestore(doc);
   }
 
+  /// Returns the existing profile if a doc with this name exists, otherwise null.
+  Future<UserProfileModel?> findProfileByName(String name) async {
+    final snap = await _db
+        .collection('user_profiles')
+        .where('name', isEqualTo: name)
+        .limit(1)
+        .get();
+    if (snap.docs.isEmpty) return null;
+    return UserProfileModel.fromFirestore(snap.docs.first);
+  }
+
   Future<void> saveUserProfile(String uid, String name, String password) async {
     final now = DateTime.now();
     final token = await FirebaseMessaging.instance.getToken();

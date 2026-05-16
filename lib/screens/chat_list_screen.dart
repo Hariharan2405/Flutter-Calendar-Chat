@@ -30,114 +30,22 @@ class _ChatListScreenState extends State<ChatListScreen> {
     try {
       final provider = context.read<AppProvider>();
       final uid = provider.userId;
-      if (uid == null) return; // auth not ready yet, should not happen
+      if (uid == null) return;
 
       final profile = provider.profile ?? await _chatService.getUserProfile(uid);
       if (!mounted) return;
 
-      if (profile == null || profile.description == null) {
-        await _showDescriptionDialog(uid);
-      } else {
-        setState(() {
-          _currentUserName = profile.description!;
-          _checkingProfile = false;
-        });
-        unawaited(_chatService.updateOnReturn(uid));
-      }
+      setState(() {
+        _currentUserName = profile?.name;
+        _checkingProfile = false;
+      });
+      unawaited(_chatService.updateOnReturn(uid));
     } catch (_) {
-      // swallow — the finally block always clears the spinner
+      // swallow — finally always clears the spinner
     } finally {
       if (mounted && _checkingProfile) {
         setState(() => _checkingProfile = false);
       }
-    }
-  }
-
-  Future<void> _showDescriptionDialog(String uid) async {
-    final ctrl = TextEditingController();
-    String? error;
-
-    await showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setLocal) => Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Row(
-                  children: [
-                    Icon(Icons.waving_hand_rounded, color: AppColors.accent, size: 28),
-                    SizedBox(width: 10),
-                    Text(
-                      'Chat Display Name',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700,
-                          color: AppColors.textPrimary),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  'What should others see when you chat? This is set once.',
-                  style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
-                ),
-                const SizedBox(height: 20),
-                TextField(
-                  controller: ctrl,
-                  autofocus: true,
-                  textCapitalization: TextCapitalization.words,
-                  decoration: const InputDecoration(
-                    labelText: 'Description',
-                    hintText: 'E.g. Harry',
-                    prefixIcon: Icon(Icons.chat_bubble_rounded),
-                  ),
-                ),
-                if (error != null) ...[
-                  const SizedBox(height: 10),
-                  Text(error!, style: const TextStyle(color: Colors.red, fontSize: 13)),
-                ],
-                const SizedBox(height: 20),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12)),
-                  ),
-                  onPressed: () async {
-                    final desc = ctrl.text.trim();
-                    if (desc.isEmpty) {
-                      setLocal(() => error = 'Please enter a description.');
-                      return;
-                    }
-                    try {
-                      await _chatService.setDescription(uid, desc);
-                    } catch (e) {
-                      setLocal(() => error = 'Failed to save. Please try again.');
-                      return;
-                    }
-                    if (ctx.mounted) Navigator.pop(ctx);
-                    if (mounted) {
-                      setState(() {
-                        _currentUserName = desc;
-                        _checkingProfile = false;
-                      });
-                    }
-                  },
-                  child: const Text('Start Chatting', style: TextStyle(fontSize: 15)),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-
-    if (mounted && _checkingProfile) {
-      setState(() => _checkingProfile = false);
     }
   }
 
@@ -261,9 +169,7 @@ class _UserTile extends StatelessWidget {
                   radius: 24,
                   backgroundColor: AppColors.primary,
                   child: Text(
-                    (user.description ?? user.name).isNotEmpty
-                        ? (user.description ?? user.name)[0].toUpperCase()
-                        : '?',
+                    user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
                     style: const TextStyle(color: Colors.white, fontSize: 18,
                         fontWeight: FontWeight.bold),
                   ),
@@ -285,7 +191,7 @@ class _UserTile extends StatelessWidget {
               ],
             ),
             title: Text(
-              user.description ?? user.name,
+              user.name,
               style: TextStyle(
                   fontWeight: unread > 0 ? FontWeight.w800 : FontWeight.w600,
                   color: AppColors.textPrimary),
