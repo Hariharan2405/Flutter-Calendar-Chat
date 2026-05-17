@@ -9,7 +9,8 @@ class NotificationService {
 
   static const _channelId = 'tn_calendar_chat';
   static const _channelName = 'Calendar';
-  static const _callChannelId = 'tn_calendar_call';
+  // v2 uses system ringtone — channel sound can't be changed after creation
+  static const _callChannelId = 'tn_calendar_call_v2';
   static const _callChannelName = 'Incoming Calls';
   static const _ongoingChannelId = 'tn_calendar_ongoing';
   static const _ongoingChannelName = 'Active Call';
@@ -45,6 +46,8 @@ class NotificationService {
         importance: Importance.max,
         playSound: true,
         enableVibration: true,
+        // System default ringtone (not message tone)
+        sound: UriAndroidNotificationSound('content://settings/system/ringtone'),
       ),
     );
 
@@ -87,13 +90,13 @@ class NotificationService {
 
   // Called by Firestore listener when app is in foreground
   static Future<void> showNewMessage() async {
-    await _show('Calendar', 'You have a new message');
+    await _show('Calendar', ' ');
   }
 
   // Called by FCM handler (foreground / background / killed)
   static Future<void> showFcmNotification(RemoteMessage message) async {
     final title = message.notification?.title ?? 'Calendar';
-    final body = message.notification?.body ?? 'You have a new message';
+    final body = message.notification?.body ?? ' ';
     await _show(title, body);
   }
 
@@ -133,6 +136,7 @@ class NotificationService {
         priority: Priority.max,
         fullScreenIntent: true,
         playSound: true,
+        sound: UriAndroidNotificationSound('content://settings/system/ringtone'),
         enableVibration: true,
         category: AndroidNotificationCategory.call,
         ongoing: true,

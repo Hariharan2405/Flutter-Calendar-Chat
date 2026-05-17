@@ -13,18 +13,19 @@ class GifPickerSheet extends StatefulWidget {
 }
 
 class _GifPickerSheetState extends State<GifPickerSheet> {
-  // Tenor public test key — works for development/low volume use
+  // Tenor v1 demo key — matches api.tenor.com/v1/ endpoint
   static const _apiKey = 'LIVDSRZULELA';
 
   final TextEditingController _searchCtrl = TextEditingController();
   List<_GifItem> _gifs = [];
   bool _loading = false;
+  String? _error;
   Timer? _debounce;
 
   @override
   void initState() {
     super.initState();
-    _loadFeatured();
+    _loadTrending();
     _searchCtrl.addListener(_onChanged);
   }
 
@@ -33,64 +34,73 @@ class _GifPickerSheetState extends State<GifPickerSheet> {
     _debounce = Timer(const Duration(milliseconds: 450), () {
       final q = _searchCtrl.text.trim();
       if (q.isEmpty) {
-        _loadFeatured();
+        _loadTrending();
       } else {
         _search(q);
       }
     });
   }
 
-  Future<void> _loadFeatured() async {
+  Future<void> _loadTrending() async {
     if (!mounted) return;
-    setState(() {
-      _loading = true;
-      _gifs = [];
-    });
+    setState(() { _loading = true; _gifs = []; _error = null; });
     try {
       final uri = Uri.parse(
-        'https://tenor.googleapis.com/v2/featured'
-        '?key=$_apiKey&limit=20&media_filter=gif,tinygif',
+        'https://api.tenor.com/v1/trending'
+        '?key=$_apiKey&limit=24&media_filter=basic',
       );
       final resp = await http.get(uri).timeout(const Duration(seconds: 10));
       if (resp.statusCode == 200 && mounted) {
         setState(() => _gifs = _parse(resp.body));
+      } else if (mounted) {
+        setState(() => _error = 'HTTP ${resp.statusCode}');
       }
-    } catch (_) {}
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    }
     if (mounted) setState(() => _loading = false);
   }
 
   Future<void> _search(String query) async {
     if (!mounted) return;
-    setState(() {
-      _loading = true;
-      _gifs = [];
-    });
+    setState(() { _loading = true; _gifs = []; _error = null; });
     try {
       final uri = Uri.parse(
-        'https://tenor.googleapis.com/v2/search'
-        '?q=${Uri.encodeComponent(query)}&key=$_apiKey&limit=20&media_filter=gif,tinygif',
+        'https://api.tenor.com/v1/search'
+        '?key=$_apiKey&q=${Uri.encodeComponent(query)}&limit=24&media_filter=basic',
       );
       final resp = await http.get(uri).timeout(const Duration(seconds: 10));
       if (resp.statusCode == 200 && mounted) {
         setState(() => _gifs = _parse(resp.body));
+      } else if (mounted) {
+        setState(() => _error = 'HTTP ${resp.statusCode}');
       }
-    } catch (_) {}
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    }
     if (mounted) setState(() => _loading = false);
   }
 
+  // Tenor v1: results[].media[0].{gif,tinygif}.url
   List<_GifItem> _parse(String body) {
     try {
       final data = jsonDecode(body) as Map<String, dynamic>;
       final results = data['results'] as List;
-      return results.map((r) {
-        final formats = r['media_formats'] as Map<String, dynamic>;
-        final gif = formats['gif'] as Map<String, dynamic>;
-        final tiny = formats['tinygif'] as Map<String, dynamic>? ?? gif;
-        return _GifItem(
-          url: gif['url'] as String,
-          preview: tiny['url'] as String,
-        );
-      }).toList();
+      final items = <_GifItem>[];
+      for (final r in results) {
+        try {
+          final mediaList = r['media'] as List;
+          final media = mediaList[0] as Map<String, dynamic>;
+          final gif = media['gif'] as Map<String, dynamic>?;
+          final tiny = (media['tinygif'] ?? media['gif']) as Map<String, dynamic>?;
+          if (gif == null || tiny == null) continue;
+          final url = gif['url'] as String?;
+          final previewUrl = tiny['url'] as String?;
+          if (url == null || previewUrl == null) continue;
+          items.add(_GifItem(url: url, preview: previewUrl));
+        } catch (_) {}
+      }
+      return items;
     } catch (_) {
       return [];
     }
@@ -143,39 +153,62 @@ class _GifPickerSheetState extends State<GifPickerSheet> {
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
-                : _gifs.isEmpty
-                    ? const Center(
-                        child: Text('No GIFs found',
-                            style: TextStyle(color: AppColors.textSecondary)),
-                      )
-                    : GridView.builder(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        gridDelegate:
-                            const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 2,
-                          mainAxisSpacing: 4,
-                          crossAxisSpacing: 4,
-                          childAspectRatio: 1.6,
+                : _error != null
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.wifi_off_rounded,
+                                  color: AppColors.textSecondary, size: 40),
+                              const SizedBox(height: 12),
+                              Text(_error!,
+                                  style: const TextStyle(
+                                      color: AppColors.textSecondary, fontSize: 12),
+                                  textAlign: TextAlign.center),
+                              const SizedBox(height: 12),
+                              TextButton(
+                                onPressed: _loadTrending,
+                                child: const Text('Retry'),
+                              ),
+                            ],
+                          ),
                         ),
-                        itemCount: _gifs.length,
-                        itemBuilder: (ctx, i) => GestureDetector(
-                          onTap: () => Navigator.pop(context, _gifs[i].url),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: CachedNetworkImage(
-                              imageUrl: _gifs[i].preview,
-                              fit: BoxFit.cover,
-                              placeholder: (_, __) =>
-                                  Container(color: AppColors.background),
-                              errorWidget: (_, __, ___) => Container(
-                                color: AppColors.background,
-                                child: const Icon(Icons.gif_rounded,
-                                    color: AppColors.textSecondary, size: 32),
+                      )
+                    : _gifs.isEmpty
+                        ? const Center(
+                            child: Text('No GIFs found',
+                                style: TextStyle(color: AppColors.textSecondary)),
+                          )
+                        : GridView.builder(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 2,
+                              mainAxisSpacing: 4,
+                              crossAxisSpacing: 4,
+                              childAspectRatio: 1.6,
+                            ),
+                            itemCount: _gifs.length,
+                            itemBuilder: (ctx, i) => GestureDetector(
+                              onTap: () => Navigator.pop(context, _gifs[i].url),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: CachedNetworkImage(
+                                  imageUrl: _gifs[i].preview,
+                                  fit: BoxFit.cover,
+                                  placeholder: (_, __) =>
+                                      Container(color: AppColors.background),
+                                  errorWidget: (_, __, ___) => Container(
+                                    color: AppColors.background,
+                                    child: const Icon(Icons.gif_rounded,
+                                        color: AppColors.textSecondary, size: 32),
+                                  ),
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      ),
           ),
           SizedBox(height: MediaQuery.of(context).padding.bottom + 8),
         ],

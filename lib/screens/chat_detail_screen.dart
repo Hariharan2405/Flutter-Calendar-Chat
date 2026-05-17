@@ -10,6 +10,7 @@ import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/chat_service.dart';
 import '../services/call_service.dart';
 import '../models/user_profile_model.dart';
@@ -19,6 +20,7 @@ import '../constants/app_theme.dart';
 import '../widgets/voice_preview_sheet.dart';
 import '../widgets/image_preview_sheet.dart';
 import '../widgets/gif_picker_sheet.dart';
+import '../widgets/sticker_picker_sheet.dart';
 import 'call_screen.dart';
 
 // Tracks active chat for notification suppression
@@ -61,11 +63,18 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   double _dragStartY = 0;
   bool _recordingStartedByDrag = false;
 
+  // Chat background — null = default color
+  Color? _bgColor;
+  String? _bgImagePath;
+  static const _defaultBgColor = Color(0xFFF0EDF8);
+
+  String get _chatId =>
+      ChatService.chatId(widget.currentUid, widget.otherUser.uid);
+
   @override
   void initState() {
     super.initState();
-    ActiveChatTracker.activeChatId =
-        ChatService.chatId(widget.currentUid, widget.otherUser.uid);
+    ActiveChatTracker.activeChatId = _chatId;
     _chatService.resetUnread(widget.currentUid, widget.otherUser.uid);
     _player.onPlayerComplete.listen((_) {
       if (mounted) setState(() => _playingMessageId = null);
@@ -75,6 +84,40 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         setState(() => _showEmojiPicker = false);
       }
     });
+    _loadBackground();
+  }
+
+  Future<void> _loadBackground() async {
+    final prefs = await SharedPreferences.getInstance();
+    final colorVal = prefs.getInt('chat_bg_color_$_chatId');
+    final imagePath = prefs.getString('chat_bg_image_$_chatId');
+    if (mounted) {
+      setState(() {
+        _bgColor = colorVal != null ? Color(colorVal) : null;
+        _bgImagePath = imagePath;
+      });
+    }
+  }
+
+  Future<void> _saveBgColor(Color color) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('chat_bg_color_$_chatId', color.toARGB32());
+    await prefs.remove('chat_bg_image_$_chatId');
+    if (mounted) setState(() { _bgColor = color; _bgImagePath = null; });
+  }
+
+  Future<void> _saveBgImage(String path) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('chat_bg_image_$_chatId', path);
+    await prefs.remove('chat_bg_color_$_chatId');
+    if (mounted) setState(() { _bgImagePath = path; _bgColor = null; });
+  }
+
+  Future<void> _resetBackground() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('chat_bg_color_$_chatId');
+    await prefs.remove('chat_bg_image_$_chatId');
+    if (mounted) setState(() { _bgColor = null; _bgImagePath = null; });
   }
 
   // ── Emoji toggle ───────────────────────────────────────────────────────────
@@ -89,25 +132,165 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     }
   }
 
+  // ── Background picker ─────────────────────────────────────────────────────
+
+  static const _bgColors = [
+    Color(0xFFF0EDF8), // default purple-tint
+    Colors.white,
+    Color(0xFFE8F5E9), // green
+    Color(0xFFE3F2FD), // blue
+    Color(0xFFFFF8E1), // yellow
+    Color(0xFFFCE4EC), // pink
+    Color(0xFFEDE7F6), // deep purple
+    Color(0xFFE0F7FA), // cyan
+    Color(0xFF1A1A2E), // dark
+    Color(0xFF2D2D44), // dark purple
+  ];
+
+  void _showBackgroundPicker() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40,
+              height: 4,
+              margin: const EdgeInsets.symmetric(vertical: 12),
+              decoration: BoxDecoration(
+                  color: AppColors.divider,
+                  borderRadius: BorderRadius.circular(2)),
+            ),
+            const Padding(
+              padding: EdgeInsets.only(bottom: 12),
+              child: Text('Chat Background',
+                  style:
+                      TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: _bgColors.map((c) {
+                  final selected =
+                      _bgColor?.toARGB32() == c.toARGB32() ||
+                      (_bgColor == null &&
+                          c.toARGB32() == _defaultBgColor.toARGB32());
+                  return GestureDetector(
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _saveBgColor(c);
+                    },
+                    child: Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: c,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: selected
+                              ? AppColors.primary
+                              : AppColors.divider,
+                          width: selected ? 3 : 1.5,
+                        ),
+                      ),
+                      child: selected
+                          ? const Icon(Icons.check,
+                              size: 18, color: AppColors.primary)
+                          : null,
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                TextButton.icon(
+                  icon: const Icon(Icons.photo_library_rounded),
+                  label: const Text('Gallery'),
+                  onPressed: () async {
+                    Navigator.pop(ctx);
+                    final file = await _imagePicker.pickImage(
+                        source: ImageSource.gallery);
+                    if (file != null) _saveBgImage(file.path);
+                  },
+                ),
+                TextButton.icon(
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: const Text('Reset'),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _resetBackground();
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ── Build ──────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
+    Widget body = Column(
+      children: [
+        Expanded(child: _buildMessageList()),
+        if (_isRecording) _buildRecordingBar(),
+        if (_replyingTo != null) _buildReplyBar(),
+        _buildInputBar(),
+        if (_showEmojiPicker) _buildEmojiPicker(),
+      ],
+    );
+
+    // Wrap with background image if set
+    if (_bgImagePath != null) {
+      body = Container(
+        decoration: BoxDecoration(
+          image: DecorationImage(
+            image: FileImage(File(_bgImagePath!)),
+            fit: BoxFit.cover,
+          ),
+        ),
+        child: body,
+      );
+    }
+
     return Scaffold(
-      backgroundColor: const Color(0xFFF0EDF8),
+      backgroundColor: _bgColor ?? _defaultBgColor,
       appBar: AppBar(
         titleSpacing: 0,
         title: Row(
           children: [
-            CircleAvatar(
-              radius: 18,
-              backgroundColor: Colors.white.withValues(alpha: 0.25),
-              child: Text(
-                widget.otherUser.name[0].toUpperCase(),
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16),
+            GestureDetector(
+              onTap: widget.otherUser.photoUrl != null
+                  ? () => _viewFullImage(widget.otherUser.photoUrl!)
+                  : null,
+              child: CircleAvatar(
+                radius: 18,
+                backgroundColor: Colors.white.withValues(alpha: 0.25),
+                backgroundImage: widget.otherUser.photoUrl != null
+                    ? CachedNetworkImageProvider(widget.otherUser.photoUrl!)
+                    : null,
+                child: widget.otherUser.photoUrl == null
+                    ? Text(
+                        widget.otherUser.name[0].toUpperCase(),
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16),
+                      )
+                    : null,
               ),
             ),
             const SizedBox(width: 10),
@@ -136,18 +319,27 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             onPressed: () => _startCall(isVideo: true),
             tooltip: 'Video call',
           ),
-          const SizedBox(width: 4),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, color: Colors.white),
+            onSelected: (v) {
+              if (v == 'bg') _showBackgroundPicker();
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: 'bg',
+                child: Row(
+                  children: [
+                    Icon(Icons.wallpaper_rounded, size: 20),
+                    SizedBox(width: 10),
+                    Text('Change Background'),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ],
       ),
-      body: Column(
-        children: [
-          Expanded(child: _buildMessageList()),
-          if (_isRecording) _buildRecordingBar(),
-          if (_replyingTo != null) _buildReplyBar(),
-          _buildInputBar(),
-          if (_showEmojiPicker) _buildEmojiPicker(),
-        ],
-      ),
+      body: body,
     );
   }
 
@@ -239,6 +431,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   }
 
   Widget _buildBubble(MessageModel msg, bool isMe) {
+    if (msg.type == MessageType.sticker) {
+      return _buildStickerBubble(msg, isMe);
+    }
     final isMedia = msg.type == MessageType.image || msg.type == MessageType.gif;
 
     return GestureDetector(
@@ -280,6 +475,36 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             child: isMedia
                 ? _buildMediaBubble(msg, isMe)
                 : _buildTextVoiceBubble(msg, isMe),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStickerBubble(MessageModel msg, bool isMe) {
+    return GestureDetector(
+      onLongPress: () => _showMessageOptions(msg, isMe),
+      child: Align(
+        alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+        child: Padding(
+          padding: EdgeInsets.only(
+            top: 3,
+            bottom: 3,
+            left: isMe ? 60 : 0,
+            right: isMe ? 0 : 60,
+          ),
+          child: Column(
+            crossAxisAlignment:
+                isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(msg.text ?? '', style: const TextStyle(fontSize: 56)),
+              Text(
+                DateFormat('HH:mm').format(msg.timestamp),
+                style: const TextStyle(
+                    fontSize: 10, color: AppColors.textSecondary),
+              ),
+            ],
           ),
         ),
       ),
@@ -486,7 +711,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             ? '🎤 Voice message'
             : msg.type == MessageType.image
                 ? '📷 Image'
-                : '🎞️ GIF';
+                : msg.type == MessageType.sticker
+                    ? (msg.text ?? '😊 Sticker')
+                    : '🎞️ GIF';
 
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 8, 8, 6),
@@ -569,45 +796,35 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   Widget _buildInputBar() {
     return Container(
       padding: EdgeInsets.only(
-        left: 8,
+        left: 6,
         right: 8,
-        top: 8,
-        bottom: MediaQuery.of(context).padding.bottom + 8,
+        top: 6,
+        bottom: MediaQuery.of(context).padding.bottom + 6,
       ),
       decoration: const BoxDecoration(
         color: Colors.white,
         boxShadow: [
-          BoxShadow(
-              color: AppColors.cardShadow,
-              blurRadius: 8,
-              offset: Offset(0, -2))
+          BoxShadow(color: Color(0x14000000), blurRadius: 12, offset: Offset(0, -2))
         ],
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           // Emoji toggle
-          GestureDetector(
+          _inputIconBtn(
+            icon: _showEmojiPicker
+                ? Icons.keyboard_rounded
+                : Icons.emoji_emotions_rounded,
             onTap: _toggleEmoji,
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 10, left: 2, right: 2),
-              child: Icon(
-                _showEmojiPicker
-                    ? Icons.keyboard_rounded
-                    : Icons.emoji_emotions_outlined,
-                color: AppColors.textSecondary,
-                size: 24,
-              ),
-            ),
+            color: _showEmojiPicker ? AppColors.primary : AppColors.textSecondary,
           ),
-          // Text field with attach button
+          // Text field
           Expanded(
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              padding: const EdgeInsets.only(left: 14, right: 4, top: 2, bottom: 2),
               decoration: BoxDecoration(
-                color: AppColors.background,
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: AppColors.divider),
+                color: const Color(0xFFF3F0FA),
+                borderRadius: BorderRadius.circular(26),
               ),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
@@ -617,13 +834,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                       controller: _textCtrl,
                       focusNode: _textFocus,
                       decoration: const InputDecoration(
-                        hintText: 'Type a message...',
+                        hintText: 'Message...',
                         border: InputBorder.none,
-                        hintStyle:
-                            TextStyle(color: AppColors.textSecondary),
+                        hintStyle: TextStyle(color: AppColors.textSecondary),
                         isDense: true,
-                        contentPadding:
-                            EdgeInsets.symmetric(vertical: 10),
+                        contentPadding: EdgeInsets.symmetric(vertical: 9),
                       ),
                       minLines: 1,
                       maxLines: 4,
@@ -634,16 +849,16 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                   GestureDetector(
                     onTap: _showAttachmentOptions,
                     child: const Padding(
-                      padding: EdgeInsets.only(bottom: 10, left: 4),
+                      padding: EdgeInsets.only(bottom: 9, left: 4, right: 6),
                       child: Icon(Icons.attach_file_rounded,
-                          color: AppColors.textSecondary, size: 22),
+                          color: AppColors.textSecondary, size: 20),
                     ),
                   ),
                 ],
               ),
             ),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 6),
           // Send / Mic
           ValueListenableBuilder<TextEditingValue>(
             valueListenable: _textCtrl,
@@ -654,6 +869,20 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       ),
     );
   }
+
+  Widget _inputIconBtn({
+    required IconData icon,
+    required VoidCallback onTap,
+    Color color = AppColors.textSecondary,
+  }) =>
+      GestureDetector(
+        onTap: onTap,
+        child: SizedBox(
+          width: 38,
+          height: 42,
+          child: Icon(icon, color: color, size: 24),
+        ),
+      );
 
   Widget _buildEmojiPicker() {
     return SizedBox(
@@ -804,6 +1033,23 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 _showGifPicker();
               },
             ),
+            ListTile(
+              leading: Container(
+                width: 40,
+                height: 40,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                    color: AppColors.primary.withValues(alpha: 0.1),
+                    shape: BoxShape.circle),
+                child: const Text('😊',
+                    style: TextStyle(fontSize: 22), textAlign: TextAlign.center),
+              ),
+              title: const Text('Sticker'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showStickerPicker();
+              },
+            ),
             const SizedBox(height: 8),
           ],
         ),
@@ -852,6 +1098,31 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         senderUid: widget.currentUid,
         receiverUid: widget.otherUser.uid,
         gifUrl: gifUrl,
+        replyToId: _replyingTo?.id,
+        replyToText: _replyToPreviewText(),
+        replyToSenderId: _replyingTo?.senderId,
+      );
+      setState(() => _replyingTo = null);
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<void> _showStickerPicker() async {
+    final String? sticker = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => const StickerPickerSheet(),
+    );
+    if (sticker == null || !mounted) return;
+
+    setState(() => _isSending = true);
+    try {
+      await _chatService.sendStickerMessage(
+        senderUid: widget.currentUid,
+        receiverUid: widget.otherUser.uid,
+        sticker: sticker,
         replyToId: _replyingTo?.id,
         replyToText: _replyToPreviewText(),
         replyToSenderId: _replyingTo?.senderId,
@@ -1064,6 +1335,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     if (m.type == MessageType.voice) return '🎤 Voice message';
     if (m.type == MessageType.image) return '📷 Image';
     if (m.type == MessageType.gif) return '🎞️ GIF';
+    if (m.type == MessageType.sticker) return m.text;
     return null;
   }
 

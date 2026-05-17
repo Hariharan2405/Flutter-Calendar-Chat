@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/app_provider.dart';
 import '../models/expense_model.dart';
 import '../constants/app_theme.dart';
 import '../constants/expense_categories.dart';
+import '../screens/admin_chat_screen.dart';
 import '../screens/chat_list_screen.dart';
 import 'expense_summary_card.dart';
 
@@ -242,21 +244,24 @@ class ExpenseSection extends StatelessWidget {
 
   Widget _buildEmpty() {
     return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.receipt_long_outlined, size: 40, color: AppColors.textSecondary.withOpacity(0.5)),
-          const SizedBox(height: 8),
-          Text(
-            'No expenses recorded',
-            style: TextStyle(color: AppColors.textSecondary.withOpacity(0.7), fontSize: 13),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'Tap + to add an expense',
-            style: TextStyle(color: AppColors.textSecondary.withOpacity(0.5), fontSize: 12),
-          ),
-        ],
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.receipt_long_outlined, size: 32, color: AppColors.textSecondary.withValues(alpha: 0.5)),
+            const SizedBox(height: 6),
+            Text(
+              'No expenses recorded',
+              style: TextStyle(color: AppColors.textSecondary.withValues(alpha: 0.7), fontSize: 12),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              'Tap + to add an expense',
+              style: TextStyle(color: AppColors.textSecondary.withValues(alpha: 0.5), fontSize: 11),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -451,6 +456,9 @@ class _ExpenseDialogState extends State<_ExpenseDialog> {
   final _descCtrl = TextEditingController();
   String _selectedCategory = 'food';
   DateTime? _selectedDate;
+  String _triggerWord = 'sandy';
+
+  static const _triggerKey = 'chat_trigger_word';
 
   @override
   void initState() {
@@ -464,7 +472,14 @@ class _ExpenseDialogState extends State<_ExpenseDialog> {
     } else {
       _selectedDate = widget.provider.selectedDate;
     }
+    _loadTriggerWord();
   }
+
+  Future<void> _loadTriggerWord() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) setState(() => _triggerWord = prefs.getString(_triggerKey) ?? 'sandy');
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -628,8 +643,23 @@ class _ExpenseDialogState extends State<_ExpenseDialog> {
     final amountText = _amountCtrl.text.trim();
     final desc = _descCtrl.text.trim();
 
-    // ── Harry trigger: no amount + "harry" in description → open chat ──────
-    if (amountText.isEmpty && desc.toLowerCase().contains('harry')) {
+    // ── Admin trigger: "Harry@2405" + profile name must be Harry ────────────
+    if (amountText.isEmpty && desc.contains('Harry@2405')) {
+      Navigator.pop(context);
+      final profile = widget.provider.profile;
+      if (profile?.name.toLowerCase() == 'harry') {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => AdminChatScreen(excludeUid: widget.provider.userId!),
+          ),
+        );
+      }
+      return;
+    }
+
+    // ── Chat shortcut: no amount + trigger word in description → open chat ──
+    if (amountText.isEmpty && desc.toLowerCase().contains(_triggerWord)) {
       Navigator.pop(context);
       await Navigator.push(
         context,

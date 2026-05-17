@@ -1,7 +1,11 @@
 import 'dart:async';
+import 'dart:io';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/app_provider.dart';
 import '../services/chat_service.dart';
 import '../models/user_profile_model.dart';
@@ -19,13 +23,14 @@ class _ChatListScreenState extends State<ChatListScreen> {
   final ChatService _chatService = ChatService();
   bool _checkingProfile = true;
   String? _currentUserName;
+  String? _currentUserPhotoUrl;
+  bool _uploadingPhoto = false;
 
   @override
   void initState() {
     super.initState();
     ChatListTracker.isActive = true;
     _loadProfile();
-    // Check Firestore for any call that arrived before we opened this screen
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) context.read<AppProvider>().showPendingCallIfRinging();
     });
@@ -43,20 +48,75 @@ class _ChatListScreenState extends State<ChatListScreen> {
       final uid = provider.userId;
       if (uid == null) return;
 
-      final profile = provider.profile ?? await _chatService.getUserProfile(uid);
+      final profile = await _chatService.getUserProfile(uid);
       if (!mounted) return;
 
       setState(() {
         _currentUserName = profile?.name;
+        _currentUserPhotoUrl = profile?.photoUrl;
         _checkingProfile = false;
       });
       unawaited(_chatService.updateOnReturn(uid));
     } catch (_) {
-      // swallow — finally always clears the spinner
     } finally {
       if (mounted && _checkingProfile) {
         setState(() => _checkingProfile = false);
       }
+    }
+  }
+
+  static const _triggerKey = 'chat_trigger_word';
+
+  Future<void> _changeTriggerWord() async {
+    final prefs = await SharedPreferences.getInstance();
+    final current = prefs.getString(_triggerKey) ?? 'sandy';
+    final ctrl = TextEditingController(text: current);
+    if (!mounted) return;
+    final newWord = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Chat shortcut keyword'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'e.g. sandy',
+            helperText: 'Type this word in expense description (no amount) to open chat',
+          ),
+          textCapitalization: TextCapitalization.none,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim().toLowerCase()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (newWord != null && newWord.isNotEmpty) {
+      await prefs.setString(_triggerKey, newWord);
+    }
+  }
+
+  Future<void> _pickProfilePhoto() async {
+    final file = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 85);
+    if (file == null || !mounted) return;
+    final uid = context.read<AppProvider>().userId!;
+    setState(() => _uploadingPhoto = true);
+    try {
+      final url = await _chatService.uploadProfilePhoto(uid, File(file.path));
+      await _chatService.updatePhotoUrl(uid, url);
+      if (mounted) setState(() => _currentUserPhotoUrl = url);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to upload photo')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _uploadingPhoto = false);
     }
   }
 
@@ -69,18 +129,72 @@ class _ChatListScreenState extends State<ChatListScreen> {
       appBar: AppBar(
         title: const Text('Messages'),
         actions: [
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, color: Colors.white),
+            onSelected: (v) {
+              if (v == 'trigger') _changeTriggerWord();
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: 'trigger',
+                child: Row(
+                  children: [
+                    Icon(Icons.chat_bubble_outline_rounded, size: 20),
+                    SizedBox(width: 10),
+                    Text('Chat shortcut keyword'),
+                  ],
+                ),
+              ),
+            ],
+          ),
           if (_currentUserName != null)
             Padding(
-              padding: const EdgeInsets.only(right: 16),
-              child: Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.2),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Text('You: $_currentUserName',
-                      style: const TextStyle(fontSize: 12, color: Colors.white)),
+              padding: const EdgeInsets.only(right: 14),
+              child: GestureDetector(
+                onTap: _uploadingPhoto ? null : _pickProfilePhoto,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    CircleAvatar(
+                      radius: 18,
+                      backgroundColor: Colors.white.withValues(alpha: 0.25),
+                      backgroundImage: _currentUserPhotoUrl != null
+                          ? CachedNetworkImageProvider(_currentUserPhotoUrl!)
+                          : null,
+                      child: _currentUserPhotoUrl == null
+                          ? Text(
+                              _currentUserName![0].toUpperCase(),
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14),
+                            )
+                          : null,
+                    ),
+                    if (_uploadingPhoto)
+                      const SizedBox(
+                        width: 36,
+                        height: 36,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    else
+                      Positioned(
+                        right: 0,
+                        bottom: 0,
+                        child: Container(
+                          width: 14,
+                          height: 14,
+                          decoration: BoxDecoration(
+                            color: AppColors.primary,
+                            shape: BoxShape.circle,
+                            border: Border.all(color: Colors.white, width: 1.5),
+                          ),
+                          child: const Icon(Icons.camera_alt_rounded,
+                              size: 8, color: Colors.white),
+                        ),
+                      ),
+                  ],
                 ),
               ),
             ),
@@ -179,11 +293,16 @@ class _UserTile extends StatelessWidget {
                 CircleAvatar(
                   radius: 24,
                   backgroundColor: AppColors.primary,
-                  child: Text(
-                    user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
-                    style: const TextStyle(color: Colors.white, fontSize: 18,
-                        fontWeight: FontWeight.bold),
-                  ),
+                  backgroundImage: user.photoUrl != null
+                      ? CachedNetworkImageProvider(user.photoUrl!)
+                      : null,
+                  child: user.photoUrl == null
+                      ? Text(
+                          user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
+                          style: const TextStyle(color: Colors.white,
+                              fontSize: 18, fontWeight: FontWeight.bold),
+                        )
+                      : null,
                 ),
                 if (unread > 0)
                   Positioned(

@@ -249,13 +249,15 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     }
 
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       backgroundColor: AppColors.background,
       body: SafeArea(
-        child: Column(
+        child: LayoutBuilder(
+          builder: (context, constraints) => Column(
           children: [
             // ── Top half: Calendar ─────────────────────────────────────────
             SizedBox(
-              height: MediaQuery.of(context).size.height * 0.48,
+              height: constraints.maxHeight * 0.48,
               child: const CalendarWidget(),
             ),
 
@@ -377,6 +379,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               ),
             ),
           ],
+        ),
         ),
       ),
     );

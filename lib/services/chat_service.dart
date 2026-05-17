@@ -58,6 +58,16 @@ class ChatService {
     );
   }
 
+  Future<String> uploadProfilePhoto(String uid, File file) async {
+    final ref = _storage.ref('profile_photos/$uid/photo.jpg');
+    await ref.putFile(file, SettableMetadata(contentType: 'image/jpeg'));
+    return await ref.getDownloadURL();
+  }
+
+  Future<void> updatePhotoUrl(String uid, String url) async {
+    await _db.collection('user_profiles').doc(uid).update({'photoUrl': url});
+  }
+
   Stream<List<UserProfileModel>> getAllUsersExcept(String currentUid) {
     return _db
         .collection('user_profiles')
@@ -243,6 +253,45 @@ class ChatService {
 
     await _db.collection('chats').doc(id).update({
       'lastMessage': '🎞️ GIF',
+      'lastSenderId': senderUid,
+      'lastMessageTime': Timestamp.fromDate(now),
+      'unread_$receiverUid': FieldValue.increment(1),
+    });
+  }
+
+  Future<void> sendStickerMessage({
+    required String senderUid,
+    required String receiverUid,
+    required String sticker,
+    String? replyToId,
+    String? replyToText,
+    String? replyToSenderId,
+  }) async {
+    await ensureChatExists(senderUid, receiverUid);
+    final id = chatId(senderUid, receiverUid);
+    final msgId = _uuid.v4();
+    final now = DateTime.now();
+
+    final msg = MessageModel(
+      id: msgId,
+      senderId: senderUid,
+      text: sticker,
+      type: MessageType.sticker,
+      timestamp: now,
+      replyToId: replyToId,
+      replyToText: replyToText,
+      replyToSenderId: replyToSenderId,
+    );
+
+    await _db
+        .collection('chats')
+        .doc(id)
+        .collection('messages')
+        .doc(msgId)
+        .set(msg.toFirestore());
+
+    await _db.collection('chats').doc(id).update({
+      'lastMessage': sticker,
       'lastSenderId': senderUid,
       'lastMessageTime': Timestamp.fromDate(now),
       'unread_$receiverUid': FieldValue.increment(1),

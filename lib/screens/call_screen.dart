@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:provider/provider.dart';
 import '../constants/app_theme.dart';
 import '../models/call_model.dart';
 import '../models/user_profile_model.dart';
+import '../providers/app_provider.dart';
 import '../services/call_service.dart';
 import '../services/notification_service.dart';
 import '../services/system_services.dart';
@@ -16,7 +18,6 @@ class CallScreen extends StatefulWidget {
   final CallType callType;
   final UserProfileModel otherUser;
   final String currentUid;
-  // true when the user returns to a minimized voice call via the ongoing notification
   final bool isRestoring;
 
   const CallScreen({
@@ -35,14 +36,12 @@ class CallScreen extends StatefulWidget {
 
 class _CallScreenState extends State<CallScreen> {
   final CallService _callService = CallService();
-  final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
-  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
 
   _CallState _callState = _CallState.connecting;
   bool _isMuted = false;
   bool _isSpeakerOn = false;
   bool _isVideoOff = false;
-  bool _hasRemoteVideo = false;
+  int? _remoteUid;
   bool _minimized = false;
   bool _isInPipMode = false;
 
@@ -57,37 +56,29 @@ class _CallScreenState extends State<CallScreen> {
     SystemServices.onPipModeChanged = (isInPip) {
       if (mounted) setState(() => _isInPipMode = isInPip);
     };
-    _initRenderers();
+    _init();
   }
 
-  Future<void> _initRenderers() async {
-    await _localRenderer.initialize();
-    await _remoteRenderer.initialize();
-
+  Future<void> _init() async {
     if (_isVideo) await SystemServices.setPipEnabled(true);
 
     if (widget.isRestoring) {
       await NotificationService.cancelOngoingCallNotification();
       _callService.updateCallbacks(
-        onLocalStream: (stream) {
-          if (mounted) setState(() => _localRenderer.srcObject = stream);
-        },
-        onRemoteStream: (stream) {
-          if (mounted) setState(() {
-            _remoteRenderer.srcObject = stream;
-            _hasRemoteVideo = _isVideo;
-          });
+        onRemoteUserJoined: (uid) {
+          if (mounted) setState(() => _remoteUid = uid);
         },
         onStatusChange: _handleStatusChange,
       );
-      if (mounted) setState(() {
-        _isMuted = _callService.isMuted;
-        _isSpeakerOn = _callService.isSpeakerOn;
-        _isVideoOff = _callService.isVideoOff;
-        if (_callService.isConnected) {
-          _callState = _CallState.connected;
-        }
-      });
+      if (mounted) {
+        setState(() {
+          _isMuted = _callService.isMuted;
+          _isSpeakerOn = _callService.isSpeakerOn;
+          _isVideoOff = _callService.isVideoOff;
+          _remoteUid = _callService.remoteUid;
+          if (_callService.isConnected) _callState = _CallState.connected;
+        });
+      }
     } else if (widget.isOutgoing) {
       await _startOutgoing();
     } else {
@@ -96,18 +87,15 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Future<void> _startOutgoing() async {
+    final myName = Provider.of<AppProvider>(context, listen: false).profile?.name ?? '';
     await _callService.startCall(
       callerId: widget.currentUid,
       calleeId: widget.otherUser.uid,
+      callerName: myName,
+      calleeName: widget.otherUser.name,
       isVideo: _isVideo,
-      onLocalStream: (stream) {
-        if (mounted) setState(() => _localRenderer.srcObject = stream);
-      },
-      onRemoteStream: (stream) {
-        if (mounted) setState(() {
-          _remoteRenderer.srcObject = stream;
-          _hasRemoteVideo = _isVideo;
-        });
+      onRemoteUserJoined: (uid) {
+        if (mounted) setState(() => _remoteUid = uid);
       },
       onStatusChange: _handleStatusChange,
     );
@@ -117,14 +105,8 @@ class _CallScreenState extends State<CallScreen> {
     await _callService.answerCall(
       callId: widget.callId,
       isVideo: _isVideo,
-      onLocalStream: (stream) {
-        if (mounted) setState(() => _localRenderer.srcObject = stream);
-      },
-      onRemoteStream: (stream) {
-        if (mounted) setState(() {
-          _remoteRenderer.srcObject = stream;
-          _hasRemoteVideo = _isVideo;
-        });
+      onRemoteUserJoined: (uid) {
+        if (mounted) setState(() => _remoteUid = uid);
       },
       onStatusChange: _handleStatusChange,
     );
@@ -148,11 +130,8 @@ class _CallScreenState extends State<CallScreen> {
     _durationTimer?.cancel();
     if (_isVideo) SystemServices.setPipEnabled(false).ignore();
     NotificationService.cancelOngoingCallNotification().ignore();
-    // Null the renderer sources first so no black WebRTC frame is shown
-    // during the 2-second "Call ended" pause before the screen pops.
     if (mounted) setState(() {
-      _localRenderer.srcObject = null;
-      _remoteRenderer.srcObject = null;
+      _remoteUid = null;
       _callState = reason;
     });
     _callService.cleanup();
@@ -165,16 +144,11 @@ class _CallScreenState extends State<CallScreen> {
     _durationTimer?.cancel();
     if (_isVideo) await SystemServices.setPipEnabled(false);
     await NotificationService.cancelOngoingCallNotification();
-    if (mounted) setState(() {
-      _localRenderer.srcObject = null;
-      _remoteRenderer.srcObject = null;
-    });
+    if (mounted) setState(() => _remoteUid = null);
     await _callService.endCall();
     if (mounted) Navigator.pop(context);
   }
 
-  // Voice call: pop the screen but keep the WebRTC session alive.
-  // An ongoing notification lets the user tap back into the call.
   Future<void> _minimizeVoiceCall() async {
     _minimized = true;
     _callService.setMinimizedMeta(
@@ -183,13 +157,11 @@ class _CallScreenState extends State<CallScreen> {
       currentUid: widget.currentUid,
       isOutgoing: widget.isOutgoing,
     );
-    // Replace UI callbacks with minimal ones so remote hang-up is still handled
     _callService.updateCallbacks(
-      onLocalStream: (_) {},
-      onRemoteStream: (_) {},
+      onRemoteUserJoined: (_) {},
       onStatusChange: (status) {
         if (status == 'ended' || status == 'declined') {
-          _callService.cleanup(); // triggers onCallEndedExternally
+          _callService.cleanup();
         }
       },
     );
@@ -229,10 +201,8 @@ class _CallScreenState extends State<CallScreen> {
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
         if (_isVideo) {
-          // Video: enter Android PiP — screen stays alive in floating window
           await SystemServices.enterPip();
         } else {
-          // Voice: minimize — pop screen, call continues, ongoing notification shown
           await _minimizeVoiceCall();
         }
       },
@@ -256,17 +226,13 @@ class _CallScreenState extends State<CallScreen> {
             child: Text(
               widget.otherUser.name[0].toUpperCase(),
               style: const TextStyle(
-                  fontSize: 44,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white),
+                  fontSize: 44, fontWeight: FontWeight.bold, color: Colors.white),
             ),
           ),
           const SizedBox(height: 24),
           Text(widget.otherUser.name,
               style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 26,
-                  fontWeight: FontWeight.w700)),
+                  color: Colors.white, fontSize: 26, fontWeight: FontWeight.w700)),
           const SizedBox(height: 8),
           Text(_statusText,
               style: const TextStyle(color: Colors.white60, fontSize: 16)),
@@ -292,16 +258,14 @@ class _CallScreenState extends State<CallScreen> {
               setState(() => _isMuted = _callService.isMuted);
             },
           ),
-          // End call — large red button in center
           GestureDetector(
             onTap: _hangUp,
             child: Container(
               width: 72,
               height: 72,
-              decoration: const BoxDecoration(
-                  color: Colors.red, shape: BoxShape.circle),
-              child: const Icon(Icons.call_end_rounded,
-                  color: Colors.white, size: 34),
+              decoration:
+                  const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
+              child: const Icon(Icons.call_end_rounded, color: Colors.white, size: 34),
             ),
           ),
           _ControlButton(
@@ -322,12 +286,18 @@ class _CallScreenState extends State<CallScreen> {
   // ── Video call UI ─────────────────────────────────────────────────────────
 
   Widget _buildVideoCall() {
+    final engine = _callService.engine;
     return Stack(
       children: [
-        // Remote video (full screen)
-        _hasRemoteVideo
-            ? RTCVideoView(_remoteRenderer,
-                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover)
+        // Remote video full screen — or avatar placeholder while connecting
+        _remoteUid != null && engine != null
+            ? AgoraVideoView(
+                controller: VideoViewController.remote(
+                  rtcEngine: engine,
+                  canvas: VideoCanvas(uid: _remoteUid!),
+                  connection: RtcConnection(channelId: widget.callId),
+                ),
+              )
             : Container(
                 color: const Color(0xFF1A0A3C),
                 child: Center(
@@ -360,7 +330,7 @@ class _CallScreenState extends State<CallScreen> {
                 ),
               ),
 
-        // Hide all overlays in PiP mode — only the remote video is visible
+        // Hide overlays in PiP mode — only remote video is visible
         if (!_isInPipMode) ...[
           // Local video thumbnail (top-right)
           Positioned(
@@ -371,34 +341,34 @@ class _CallScreenState extends State<CallScreen> {
               child: SizedBox(
                 width: 100,
                 height: 140,
-                child: _isVideoOff
+                child: _isVideoOff || engine == null
                     ? Container(
                         color: Colors.black54,
                         child: const Icon(Icons.videocam_off_rounded,
                             color: Colors.white54, size: 28))
-                    : RTCVideoView(_localRenderer,
-                        mirror: true,
-                        objectFit: RTCVideoViewObjectFit
-                            .RTCVideoViewObjectFitCover),
+                    : AgoraVideoView(
+                        controller: VideoViewController(
+                          rtcEngine: engine,
+                          canvas: const VideoCanvas(uid: 0),
+                        ),
+                      ),
               ),
             ),
           ),
 
-          // Status chip when connected
+          // Duration chip when connected
           if (_callState == _CallState.connected)
             Positioned(
               top: MediaQuery.of(context).padding.top + 16,
               left: 16,
               child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                 decoration: BoxDecoration(
                   color: Colors.black45,
                   borderRadius: BorderRadius.circular(20),
                 ),
                 child: Text(_statusText,
-                    style: const TextStyle(
-                        color: Colors.white, fontSize: 13)),
+                    style: const TextStyle(color: Colors.white, fontSize: 13)),
               ),
             ),
 
@@ -436,16 +406,14 @@ class _CallScreenState extends State<CallScreen> {
             setState(() => _isVideoOff = _callService.isVideoOff);
           },
         ),
-        // End call
         GestureDetector(
           onTap: _hangUp,
           child: Container(
             width: 68,
             height: 68,
-            decoration: const BoxDecoration(
-                color: Colors.red, shape: BoxShape.circle),
-            child: const Icon(Icons.call_end_rounded,
-                color: Colors.white, size: 32),
+            decoration:
+                const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
+            child: const Icon(Icons.call_end_rounded, color: Colors.white, size: 32),
           ),
         ),
         _ControlButton(
@@ -471,12 +439,7 @@ class _CallScreenState extends State<CallScreen> {
   void dispose() {
     SystemServices.onPipModeChanged = null;
     _durationTimer?.cancel();
-    if (!_minimized) {
-      // Only cleanup WebRTC if we truly ended — not if we just minimized
-      _callService.cleanup();
-    }
-    _localRenderer.dispose();
-    _remoteRenderer.dispose();
+    if (!_minimized) _callService.cleanup();
     super.dispose();
   }
 }
@@ -510,8 +473,7 @@ class _ControlButton extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(label,
-              style:
-                  const TextStyle(color: Colors.white60, fontSize: 11)),
+              style: const TextStyle(color: Colors.white60, fontSize: 11)),
         ],
       ),
     );

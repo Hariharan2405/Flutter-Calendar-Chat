@@ -5,6 +5,7 @@ class UserProfileModel {
   final String name;
   final String? password;
   final String? description; // chat alias shown to others
+  final String? photoUrl;
   final DateTime createdAt;
   final DateTime lastSeen;
 
@@ -13,6 +14,7 @@ class UserProfileModel {
     required this.name,
     this.password,
     this.description,
+    this.photoUrl,
     required this.createdAt,
     required this.lastSeen,
   });
@@ -26,6 +28,7 @@ class UserProfileModel {
       name: data['name'] as String? ?? 'Unknown',
       password: data['password'] as String?,
       description: data['description'] as String?,
+      photoUrl: data['photoUrl'] as String?,
       createdAt: createdAt,
       lastSeen: lastSeen,
     );

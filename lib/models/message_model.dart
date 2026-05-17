@@ -1,6 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
-enum MessageType { text, voice, image, gif }
+enum MessageType { text, voice, image, gif, sticker }
 
 class MessageModel {
   final String id;
@@ -44,6 +44,9 @@ class MessageModel {
       case 'gif':
         type = MessageType.gif;
         break;
+      case 'sticker':
+        type = MessageType.sticker;
+        break;
       default:
         type = MessageType.text;
     }
@@ -74,6 +77,9 @@ class MessageModel {
         break;
       case MessageType.gif:
         typeStr = 'gif';
+        break;
+      case MessageType.sticker:
+        typeStr = 'sticker';
         break;
       default:
         typeStr = 'text';

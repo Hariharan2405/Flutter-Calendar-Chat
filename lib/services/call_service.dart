@@ -1,11 +1,17 @@
 import 'dart:async';
+import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:uuid/uuid.dart';
 import '../models/call_model.dart';
 import '../models/user_profile_model.dart';
 
 class CallService {
+  // Get free App ID from console.agora.io:
+  // 1. Sign up → Create Project → Testing Mode (no certificate needed)
+  // 2. Copy App ID below
+  static const _appId = '8697549310aa4dbfacfaa76d9dd6c027';
+
   static final CallService _instance = CallService._();
   factory CallService() => _instance;
   CallService._();
@@ -13,101 +19,76 @@ class CallService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   final _uuid = const Uuid();
 
-  RTCPeerConnection? _pc;
-  MediaStream? _localStream;
-  MediaStream? _remoteStream;
-  final List<RTCIceCandidate> _pendingCandidates = [];
-
+  RtcEngine? _engine;
   StreamSubscription? _callDocSub;
-  StreamSubscription? _remoteCandidatesSub;
 
-  // Mutable callbacks — updated when call is restored after minimize
   void Function(String)? _onStatusChange;
-  void Function(MediaStream)? _onRemoteStream;
+  void Function(int remoteUid)? _onRemoteUserJoined;
 
-  // Metadata for restoring a minimized voice call
   UserProfileModel? minimizedOtherUser;
   CallType? minimizedCallType;
   String? minimizedCurrentUid;
   bool? minimizedIsOutgoing;
 
-  // AppProvider sets this to cancel the ongoing notification when the remote hangs up
   static void Function()? onCallEndedExternally;
 
   String? activeCallId;
-  bool _remoteDescSet = false;
-  bool _connected = false;
   bool _isMuted = false;
   bool _isSpeakerOn = false;
   bool _isVideoOff = false;
+  bool _isConnected = false;
+  int? _remoteUid;
+
+  // Call log data — populated during the call, written on end
+  String? _callerName;
+  String? _calleeName;
+  String? _callTypeStr;
+  DateTime? _callConnectedAt;
 
   bool get isMuted => _isMuted;
   bool get isSpeakerOn => _isSpeakerOn;
   bool get isVideoOff => _isVideoOff;
-  bool get isInCall => _pc != null;
-  bool get isConnected => _connected;
-  MediaStream? get localStream => _localStream;
-  MediaStream? get remoteStream => _remoteStream;
+  bool get isInCall => _engine != null;
+  bool get isConnected => _isConnected;
+  int? get remoteUid => _remoteUid;
+  RtcEngine? get engine => _engine;
 
-  static const _iceConfig = {
-    'iceServers': [
-      {
-        'urls': [
-          'stun:stun.l.google.com:19302',
-          'stun:stun1.l.google.com:19302',
-          'stun:stun2.l.google.com:19302',
-          'stun:stun3.l.google.com:19302',
-          'stun:stun4.l.google.com:19302',
-        ]
-      },
-      {
-        'urls': 'turn:openrelay.metered.ca:80',
-        'username': 'openrelayproject',
-        'credential': 'openrelayproject',
-      },
-      {
-        'urls': 'turn:openrelay.metered.ca:443',
-        'username': 'openrelayproject',
-        'credential': 'openrelayproject',
-      },
-      {
-        'urls': 'turn:openrelay.metered.ca:443?transport=tcp',
-        'username': 'openrelayproject',
-        'credential': 'openrelayproject',
-      },
-    ],
-  };
+  // ── Engine setup ──────────────────────────────────────────────────────────
 
-  // ── Shared peer connection setup ──────────────────────────────────────────
+  Future<void> _initEngine({required bool isVideo}) async {
+    _engine = createAgoraRtcEngine();
+    await _engine!.initialize(RtcEngineContext(
+      appId: _appId,
+      channelProfile: ChannelProfileType.channelProfileCommunication,
+    ));
 
-  Future<void> _initPC({required bool isVideo}) async {
-    _pc = await createPeerConnection(_iceConfig);
+    await _engine!.setClientRole(role: ClientRoleType.clientRoleBroadcaster);
+    await _engine!.enableAudio();
 
-    _pc!.onIceConnectionState = (state) {
-      switch (state) {
-        case RTCIceConnectionState.RTCIceConnectionStateConnected:
-        case RTCIceConnectionState.RTCIceConnectionStateCompleted:
-          if (!_connected) {
-            _connected = true;
-            _onStatusChange?.call('connected');
-            if (!isVideo) Helper.setSpeakerphoneOn(false).ignore();
-          }
-          break;
-        case RTCIceConnectionState.RTCIceConnectionStateFailed:
-        case RTCIceConnectionState.RTCIceConnectionStateDisconnected:
+    if (isVideo) {
+      await _engine!.enableVideo();
+      await _engine!.startPreview();
+    }
+
+    _engine!.registerEventHandler(RtcEngineEventHandler(
+      onUserJoined: (connection, remoteUid, elapsed) {
+        _callConnectedAt = DateTime.now();
+        _remoteUid = remoteUid;
+        _isConnected = true;
+        _onStatusChange?.call('connected');
+        _onRemoteUserJoined?.call(remoteUid);
+      },
+      onUserOffline: (connection, remoteUid, reason) {
+        _isConnected = false;
+        _remoteUid = null;
+        _onStatusChange?.call('ended');
+      },
+      onConnectionStateChanged: (connection, state, reason) {
+        if (state == ConnectionStateType.connectionStateFailed) {
           _onStatusChange?.call('ended');
-          break;
-        default:
-          break;
-      }
-    };
-
-    _pc!.onTrack = (event) {
-      if (event.streams.isNotEmpty) {
-        _remoteStream = event.streams[0];
-        _onRemoteStream?.call(event.streams[0]);
-      }
-    };
+        }
+      },
+    ));
   }
 
   // ── Outgoing call ─────────────────────────────────────────────────────────
@@ -115,84 +96,59 @@ class CallService {
   Future<String> startCall({
     required String callerId,
     required String calleeId,
+    required String callerName,
+    required String calleeName,
     required bool isVideo,
-    required void Function(MediaStream) onLocalStream,
-    required void Function(MediaStream) onRemoteStream,
+    required void Function(int remoteUid) onRemoteUserJoined,
     required void Function(String status) onStatusChange,
   }) async {
+    await _requestPermissions(isVideo);
+
     final callId = _uuid.v4();
     activeCallId = callId;
+    _callerName = callerName;
+    _calleeName = calleeName;
+    _callTypeStr = isVideo ? 'video' : 'voice';
     _isMuted = false;
     _isSpeakerOn = isVideo;
     _onStatusChange = onStatusChange;
-    _onRemoteStream = onRemoteStream;
+    _onRemoteUserJoined = onRemoteUserJoined;
 
-    _localStream = await _getMedia(isVideo);
-    onLocalStream(_localStream!);
+    await _initEngine(isVideo: isVideo);
 
-    await _initPC(isVideo: isVideo);
+    await _engine!.joinChannel(
+      token: '',
+      channelId: callId,
+      uid: 0,
+      options: ChannelMediaOptions(
+        clientRoleType: ClientRoleType.clientRoleBroadcaster,
+        publishMicrophoneTrack: true,
+        publishCameraTrack: isVideo,
+        autoSubscribeAudio: true,
+        autoSubscribeVideo: isVideo,
+      ),
+    );
 
-    for (final track in _localStream!.getTracks()) {
-      await _pc!.addTrack(track, _localStream!);
+    if (!isVideo) {
+      try { await _engine!.setEnableSpeakerphone(false); } catch (_) {}
     }
 
-    final callRef = _db.collection('calls').doc(callId);
-
-    // Wire up ICE callback BEFORE setLocalDescription so no candidates are missed
-    _pc!.onIceCandidate = (c) {
-      if (c.candidate == null) return;
-      callRef.collection('callerCandidates').add({
-        'candidate': c.candidate,
-        'sdpMid': c.sdpMid,
-        'sdpMLineIndex': c.sdpMLineIndex,
-      });
-    };
-
-    final offer = await _pc!.createOffer();
-    await _pc!.setLocalDescription(offer);
-
-    await callRef.set({
+    // Minimal signaling doc — only exists until call ends
+    await _db.collection('calls').doc(callId).set({
       'callerId': callerId,
       'calleeId': calleeId,
-      'type': isVideo ? 'video' : 'voice',
+      'callerName': callerName,
+      'calleeName': calleeName,
+      'type': _callTypeStr,
       'status': 'ringing',
-      'offer': {'type': offer.type, 'sdp': offer.sdp},
       'createdAt': Timestamp.now(),
     });
 
-    _callDocSub = callRef.snapshots().listen((snap) async {
+    _callDocSub = _db.collection('calls').doc(callId).snapshots().listen((snap) {
       if (!snap.exists) return;
-      final data = snap.data()!;
-      final status = data['status'] as String?;
-
-      if (status == 'answered' && data['answer'] != null && !_remoteDescSet) {
-        _remoteDescSet = true;
-        final answer = data['answer'] as Map<String, dynamic>;
-        await _pc!.setRemoteDescription(
-          RTCSessionDescription(answer['sdp'], answer['type']),
-        );
-        for (final c in List.of(_pendingCandidates)) {
-          await _pc!.addCandidate(c);
-        }
-        _pendingCandidates.clear();
-      } else if (status == 'ended' || status == 'declined') {
+      final status = snap.data()?['status'] as String?;
+      if (status == 'ended' || status == 'declined') {
         _onStatusChange?.call(status!);
-      }
-    });
-
-    _remoteCandidatesSub =
-        callRef.collection('calleeCandidates').snapshots().listen((snap) async {
-      for (final change in snap.docChanges) {
-        if (change.type != DocumentChangeType.added) continue;
-        final d = change.doc.data()!;
-        final candidate = RTCIceCandidate(
-          d['candidate'], d['sdpMid'], d['sdpMLineIndex'],
-        );
-        if (_remoteDescSet) {
-          await _pc!.addCandidate(candidate);
-        } else {
-          _pendingCandidates.add(candidate);
-        }
       }
     });
 
@@ -204,69 +160,51 @@ class CallService {
   Future<void> answerCall({
     required String callId,
     required bool isVideo,
-    required void Function(MediaStream) onLocalStream,
-    required void Function(MediaStream) onRemoteStream,
+    required void Function(int remoteUid) onRemoteUserJoined,
     required void Function(String status) onStatusChange,
   }) async {
+    await _requestPermissions(isVideo);
+
     activeCallId = callId;
     _isMuted = false;
     _isSpeakerOn = isVideo;
     _onStatusChange = onStatusChange;
-    _onRemoteStream = onRemoteStream;
+    _onRemoteUserJoined = onRemoteUserJoined;
 
-    final callRef = _db.collection('calls').doc(callId);
-    final snap = await callRef.get();
+    // Read names so we can write the call log on end
+    final snap = await _db.collection('calls').doc(callId).get();
     if (!snap.exists) return;
-    final offer = (snap.data()!['offer']) as Map<String, dynamic>;
+    final data = snap.data()!;
+    _callerName = data['callerName'] as String?;
+    _calleeName = data['calleeName'] as String?;
+    _callTypeStr = data['type'] as String?;
 
-    _localStream = await _getMedia(isVideo);
-    onLocalStream(_localStream!);
+    await _initEngine(isVideo: isVideo);
 
-    await _initPC(isVideo: isVideo);
+    await _engine!.joinChannel(
+      token: '',
+      channelId: callId,
+      uid: 0,
+      options: ChannelMediaOptions(
+        clientRoleType: ClientRoleType.clientRoleBroadcaster,
+        publishMicrophoneTrack: true,
+        publishCameraTrack: isVideo,
+        autoSubscribeAudio: true,
+        autoSubscribeVideo: isVideo,
+      ),
+    );
 
-    for (final track in _localStream!.getTracks()) {
-      await _pc!.addTrack(track, _localStream!);
+    if (!isVideo) {
+      try { await _engine!.setEnableSpeakerphone(false); } catch (_) {}
     }
 
-    // Wire up ICE callback BEFORE setLocalDescription so no candidates are missed
-    _pc!.onIceCandidate = (c) {
-      if (c.candidate == null) return;
-      callRef.collection('calleeCandidates').add({
-        'candidate': c.candidate,
-        'sdpMid': c.sdpMid,
-        'sdpMLineIndex': c.sdpMLineIndex,
-      });
-    };
+    await _db.collection('calls').doc(callId).update({'status': 'answered'});
 
-    await _pc!.setRemoteDescription(
-      RTCSessionDescription(offer['sdp'], offer['type']),
-    );
-    _remoteDescSet = true;
-
-    final answer = await _pc!.createAnswer();
-    await _pc!.setLocalDescription(answer);
-
-    await callRef.update({
-      'status': 'answered',
-      'answer': {'type': answer.type, 'sdp': answer.sdp},
-    });
-
-    _remoteCandidatesSub =
-        callRef.collection('callerCandidates').snapshots().listen((snap) async {
-      for (final change in snap.docChanges) {
-        if (change.type != DocumentChangeType.added) continue;
-        final d = change.doc.data()!;
-        await _pc!.addCandidate(RTCIceCandidate(
-          d['candidate'], d['sdpMid'], d['sdpMLineIndex'],
-        ));
-      }
-    });
-
-    _callDocSub = callRef.snapshots().listen((snap) {
+    _callDocSub = _db.collection('calls').doc(callId).snapshots().listen((snap) {
       if (!snap.exists) return;
-      final status = snap.data()?['status'];
+      final status = snap.data()?['status'] as String?;
       if (status == 'ended' || status == 'declined') {
-        _onStatusChange?.call(status as String);
+        _onStatusChange?.call(status!);
       }
     });
   }
@@ -274,15 +212,13 @@ class CallService {
   // ── Restore a minimized voice call in a new CallScreen ────────────────────
 
   void updateCallbacks({
-    required void Function(MediaStream) onLocalStream,
-    required void Function(MediaStream) onRemoteStream,
+    required void Function(int remoteUid) onRemoteUserJoined,
     required void Function(String) onStatusChange,
   }) {
     _onStatusChange = onStatusChange;
-    _onRemoteStream = onRemoteStream;
-    if (_localStream != null) onLocalStream(_localStream!);
-    if (_remoteStream != null) onRemoteStream(_remoteStream!);
-    if (_connected) onStatusChange('connected');
+    _onRemoteUserJoined = onRemoteUserJoined;
+    if (_remoteUid != null) onRemoteUserJoined(_remoteUid!);
+    if (_isConnected) onStatusChange('connected');
   }
 
   void setMinimizedMeta({
@@ -301,30 +237,48 @@ class CallService {
 
   Future<void> toggleMute() async {
     _isMuted = !_isMuted;
-    _localStream?.getAudioTracks().forEach((t) => t.enabled = !_isMuted);
+    await _engine?.muteLocalAudioStream(_isMuted);
   }
 
   Future<void> toggleSpeaker() async {
     _isSpeakerOn = !_isSpeakerOn;
-    await Helper.setSpeakerphoneOn(_isSpeakerOn);
+    try { await _engine?.setEnableSpeakerphone(_isSpeakerOn); } catch (_) {}
   }
 
   Future<void> switchCamera() async {
-    final videoTrack = _localStream?.getVideoTracks().firstOrNull;
-    if (videoTrack != null) await Helper.switchCamera(videoTrack);
+    await _engine?.switchCamera();
   }
 
   Future<void> toggleVideo() async {
     _isVideoOff = !_isVideoOff;
-    _localStream?.getVideoTracks().forEach((t) => t.enabled = !_isVideoOff);
+    await _engine?.muteLocalVideoStream(_isVideoOff);
   }
 
   // ── End / decline ─────────────────────────────────────────────────────────
 
   Future<void> endCall() async {
-    if (activeCallId != null) {
+    final callId = activeCallId;
+    if (callId != null) {
       try {
-        await _db.collection('calls').doc(activeCallId).update({'status': 'ended'});
+        final connectedAt = _callConnectedAt;
+        if (connectedAt != null) {
+          // Call was answered — replace signaling doc with minimal log
+          final endedAt = DateTime.now();
+          await _db.collection('calls').doc(callId).set({
+            'callerName': _callerName,
+            'calleeName': _calleeName,
+            'type': _callTypeStr,
+            'startedAt': Timestamp.fromDate(connectedAt),
+            'endedAt': Timestamp.fromDate(endedAt),
+            'durationSeconds': endedAt.difference(connectedAt).inSeconds,
+          });
+        } else {
+          // Call never connected — signal ended then delete the signaling doc
+          await _db.collection('calls').doc(callId).update({'status': 'ended'});
+          Future.delayed(const Duration(seconds: 4), () {
+            _db.collection('calls').doc(callId).delete().ignore();
+          });
+        }
       } catch (_) {}
     }
     await cleanup();
@@ -333,30 +287,33 @@ class CallService {
   Future<void> declineCall(String callId) async {
     try {
       await _db.collection('calls').doc(callId).update({'status': 'declined'});
+      // Give caller ~4s to read 'declined', then delete
+      Future.delayed(const Duration(seconds: 4), () {
+        _db.collection('calls').doc(callId).delete().ignore();
+      });
     } catch (_) {}
   }
 
   Future<void> cleanup() async {
     _callDocSub?.cancel();
-    _remoteCandidatesSub?.cancel();
     _callDocSub = null;
-    _remoteCandidatesSub = null;
-    _pendingCandidates.clear();
 
-    _localStream?.getTracks().forEach((t) => t.stop());
-    await _localStream?.dispose();
-    _localStream = null;
-    _remoteStream = null;
+    await _engine?.leaveChannel();
+    await _engine?.release();
+    _engine = null;
 
-    await _pc?.close();
-    _pc = null;
     activeCallId = null;
-    _remoteDescSet = false;
-    _connected = false;
     _isMuted = false;
     _isVideoOff = false;
+    _isSpeakerOn = false;
+    _isConnected = false;
+    _remoteUid = null;
+    _callConnectedAt = null;
+    _callerName = null;
+    _calleeName = null;
+    _callTypeStr = null;
     _onStatusChange = null;
-    _onRemoteStream = null;
+    _onRemoteUserJoined = null;
     minimizedOtherUser = null;
     minimizedCallType = null;
     minimizedCurrentUid = null;
@@ -364,10 +321,6 @@ class CallService {
 
     onCallEndedExternally?.call();
     onCallEndedExternally = null;
-
-    try {
-      await Helper.setSpeakerphoneOn(false);
-    } catch (_) {}
   }
 
   // ── Streams ───────────────────────────────────────────────────────────────
@@ -384,12 +337,9 @@ class CallService {
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  Future<MediaStream> _getMedia(bool isVideo) async {
-    return await navigator.mediaDevices.getUserMedia({
-      'audio': true,
-      'video': isVideo
-          ? {'facingMode': 'user', 'width': 1280, 'height': 720}
-          : false,
-    });
+  Future<void> _requestPermissions(bool isVideo) async {
+    final permissions = [Permission.microphone];
+    if (isVideo) permissions.add(Permission.camera);
+    await permissions.request();
   }
 }

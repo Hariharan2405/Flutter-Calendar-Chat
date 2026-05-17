@@ -45,8 +45,11 @@ dependencies:
   cached_network_image: ^3.4.1
   http: ^1.2.2
 
-  # Voice & video calls
-  flutter_webrtc: ^1.4.1
+  # Voice & video calls — Agora handles all NAT/TURN internally
+  agora_rtc_engine: ^6.3.2
+
+  # Persistence
+  shared_preferences: ^2.3.2
 
   # UI
   cupertino_icons: ^1.0.8
