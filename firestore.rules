@@ -13,7 +13,23 @@ service cloud.firestore {
       allow write: if request.auth != null && request.auth.uid == userId;
     }
 
-    // Chat rooms
+    // Voice & video calls
+    match /calls/{callId} {
+      allow read, write: if request.auth != null &&
+        (request.auth.uid == resource.data.callerId ||
+         request.auth.uid == resource.data.calleeId);
+      allow create: if request.auth != null &&
+        request.auth.uid == request.resource.data.callerId;
+
+      match /callerCandidates/{id} {
+        allow read, write: if request.auth != null;
+      }
+      match /calleeCandidates/{id} {
+        allow read, write: if request.auth != null;
+      }
+    }
+
+    // Chat rooms — participants field is the source of truth
     match /chats/{chatId} {
       allow read: if request.auth != null &&
         request.auth.uid in resource.data.participants;
@@ -22,12 +38,9 @@ service cloud.firestore {
       allow update: if request.auth != null &&
         request.auth.uid in resource.data.participants;
 
-      // Messages inside a chat
+      // Messages: any authenticated user who is a participant of the chat
       match /messages/{messageId} {
-        allow read: if request.auth != null &&
-          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
-        allow create: if request.auth != null &&
-          request.auth.uid == request.resource.data.senderId &&
+        allow read, write: if request.auth != null &&
           request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
       }
     }

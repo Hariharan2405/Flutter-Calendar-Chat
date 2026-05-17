@@ -131,6 +131,9 @@ class ChatService {
     required String senderUid,
     required String receiverUid,
     required String text,
+    String? replyToId,
+    String? replyToText,
+    String? replyToSenderId,
   }) async {
     await ensureChatExists(senderUid, receiverUid);
     final id = chatId(senderUid, receiverUid);
@@ -143,6 +146,9 @@ class ChatService {
       text: text,
       type: MessageType.text,
       timestamp: now,
+      replyToId: replyToId,
+      replyToText: replyToText,
+      replyToSenderId: replyToSenderId,
     );
 
     await _db
@@ -154,6 +160,89 @@ class ChatService {
 
     await _db.collection('chats').doc(id).update({
       'lastMessage': text,
+      'lastSenderId': senderUid,
+      'lastMessageTime': Timestamp.fromDate(now),
+      'unread_$receiverUid': FieldValue.increment(1),
+    });
+  }
+
+  Future<void> sendImageMessage({
+    required String senderUid,
+    required String receiverUid,
+    required File imageFile,
+    String? replyToId,
+    String? replyToText,
+    String? replyToSenderId,
+  }) async {
+    await ensureChatExists(senderUid, receiverUid);
+    final id = chatId(senderUid, receiverUid);
+    final msgId = _uuid.v4();
+    final now = DateTime.now();
+
+    final ext = imageFile.path.split('.').last.toLowerCase();
+    final ref = _storage.ref('chat_images/$senderUid/$msgId.$ext');
+    await ref.putFile(imageFile);
+    final imageUrl = await ref.getDownloadURL();
+
+    final msg = MessageModel(
+      id: msgId,
+      senderId: senderUid,
+      imageUrl: imageUrl,
+      type: MessageType.image,
+      timestamp: now,
+      replyToId: replyToId,
+      replyToText: replyToText,
+      replyToSenderId: replyToSenderId,
+    );
+
+    await _db
+        .collection('chats')
+        .doc(id)
+        .collection('messages')
+        .doc(msgId)
+        .set(msg.toFirestore());
+
+    await _db.collection('chats').doc(id).update({
+      'lastMessage': '📷 Image',
+      'lastSenderId': senderUid,
+      'lastMessageTime': Timestamp.fromDate(now),
+      'unread_$receiverUid': FieldValue.increment(1),
+    });
+  }
+
+  Future<void> sendGifMessage({
+    required String senderUid,
+    required String receiverUid,
+    required String gifUrl,
+    String? replyToId,
+    String? replyToText,
+    String? replyToSenderId,
+  }) async {
+    await ensureChatExists(senderUid, receiverUid);
+    final id = chatId(senderUid, receiverUid);
+    final msgId = _uuid.v4();
+    final now = DateTime.now();
+
+    final msg = MessageModel(
+      id: msgId,
+      senderId: senderUid,
+      imageUrl: gifUrl,
+      type: MessageType.gif,
+      timestamp: now,
+      replyToId: replyToId,
+      replyToText: replyToText,
+      replyToSenderId: replyToSenderId,
+    );
+
+    await _db
+        .collection('chats')
+        .doc(id)
+        .collection('messages')
+        .doc(msgId)
+        .set(msg.toFirestore());
+
+    await _db.collection('chats').doc(id).update({
+      'lastMessage': '🎞️ GIF',
       'lastSenderId': senderUid,
       'lastMessageTime': Timestamp.fromDate(now),
       'unread_$receiverUid': FieldValue.increment(1),

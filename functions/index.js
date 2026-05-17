@@ -2,6 +2,7 @@ const { onDocumentCreated } = require('firebase-functions/v2/firestore');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
+const { logger } = require('firebase-functions');
 
 initializeApp();
 
@@ -31,6 +32,57 @@ function randomMessage() {
  * Fires when a new message is created in chats/{chatId}/messages/{messageId}.
  * Sends a random reminder notification instead of the real message content.
  */
+/**
+ * Fires when a new call document is created.
+ * Sends a high-priority FCM data message to the callee so the app
+ * wakes up even when killed and shows a full-screen incoming call UI.
+ */
+exports.onCallCreated = onDocumentCreated(
+  'calls/{callId}',
+  async (event) => {
+    const callData = event.data.data();
+    if (callData.status !== 'ringing') return;
+
+    const calleeId = callData.calleeId;
+    const callerId = callData.callerId;
+    const callId = event.params.callId;
+    const db = getFirestore();
+
+    const [calleeDoc, callerDoc] = await Promise.all([
+      db.collection('user_profiles').doc(calleeId).get(),
+      db.collection('user_profiles').doc(callerId).get(),
+    ]);
+    if (!calleeDoc.exists) return;
+
+    const fcmToken = calleeDoc.data().fcmToken;
+    if (!fcmToken) return;
+
+    const callerName = callerDoc.exists ? callerDoc.data().name : 'Unknown';
+
+    try {
+      await getMessaging().send({
+        token: fcmToken,
+        data: {
+          type: 'incoming_call',
+          callId: callId,
+          callerId: callerId,
+          callerName: callerName,
+          callType: callData.type,
+        },
+        android: { priority: 'high' },
+      });
+    } catch (err) {
+      logger.error('FCM call send failed', err);
+      if (
+        err.code === 'messaging/invalid-registration-token' ||
+        err.code === 'messaging/registration-token-not-registered'
+      ) {
+        await db.collection('user_profiles').doc(calleeId).update({ fcmToken: null });
+      }
+    }
+  }
+);
+
 exports.sendChatNotification = onDocumentCreated(
   'chats/{chatId}/messages/{messageId}',
   async (event) => {

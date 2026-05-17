@@ -2,25 +2,38 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
+import '../main.dart' show navigatorKey;
 import '../models/note_model.dart';
 import '../models/expense_model.dart';
 import '../models/user_profile_model.dart';
+import '../models/call_model.dart';
 import '../services/auth_service.dart';
+import '../services/call_service.dart';
 import '../services/chat_service.dart';
 import '../services/notes_service.dart';
 import '../services/expense_service.dart';
 import '../services/notification_service.dart';
-import '../screens/chat_detail_screen.dart';
+import '../screens/call_screen.dart';
+import '../screens/incoming_call_screen.dart';
 
 enum ExpenseViewMode { day, week, month, year, custom }
+
+// Set to true while ChatListScreen is on screen so incoming calls
+// auto-push IncomingCallScreen without requiring a notification tap.
+class ChatListTracker {
+  static bool isActive = false;
+}
 
 class AppProvider extends ChangeNotifier {
   final AuthService _authService = AuthService();
   final NotesService _notesService = NotesService();
   final ExpenseService _expenseService = ExpenseService();
   final ChatService _chatService = ChatService();
+  final CallService _callService = CallService();
 
-  StreamSubscription<QuerySnapshot>? _chatNotifSub;
+  StreamSubscription<QuerySnapshot>? _incomingCallSub;
+  // Tracks callIds currently being shown in IncomingCallScreen to avoid duplicates
+  final Set<String> _showingCallIds = {};
 
   String? _userId;
   UserProfileModel? _profile;
@@ -76,9 +89,10 @@ class AppProvider extends ChangeNotifier {
       await _refreshMetadata();
       _subscribeNotes();
       _subscribeExpenses();
-      _listenForChatNotifications();
+      _listenForIncomingCalls();
       _profile = await _chatService.getUserProfile(_userId!);
       unawaited(_saveFcmToken());
+      _setupCallNotificationHandlers();
       _isLoading = false;
       notifyListeners();
     } catch (e) {
@@ -275,32 +289,133 @@ class AppProvider extends ChangeNotifier {
     });
   }
 
-  // ── Chat Notifications ────────────────────────────────────────────────────
-  void _listenForChatNotifications() {
+  // ── Incoming Call Listener ────────────────────────────────────────────────
+  void _listenForIncomingCalls() {
     if (_userId == null) return;
-    _chatNotifSub?.cancel();
-    _chatNotifSub = _chatService.allChatsFor(_userId!).listen((snapshot) {
-      for (final change in snapshot.docChanges) {
-        if (change.type == DocumentChangeType.modified) {
-          final data = change.doc.data() as Map<String, dynamic>;
-          final lastSenderId = data['lastSenderId'] as String?;
-          final chatId = change.doc.id;
-          // Notify only if: message is from someone else AND user is not in that chat
-          if (lastSenderId != null &&
-              lastSenderId != _userId &&
-              ActiveChatTracker.activeChatId != chatId) {
-            NotificationService.showNewMessage();
-          }
+    _incomingCallSub?.cancel();
+    _incomingCallSub =
+        _callService.incomingCallsFor(_userId!).listen((snap) async {
+      for (final change in snap.docChanges) {
+        if (change.type != DocumentChangeType.added) continue;
+        if (_callService.isInCall) continue;
+
+        final data = change.doc.data() as Map<String, dynamic>;
+        final status = data['status'] as String?;
+        if (status != 'ringing') continue;
+        final callId = change.doc.id;
+        final callerId = data['callerId'] as String;
+        final isVideo = data['type'] == 'video';
+
+        final caller = await _chatService.getUserProfile(callerId);
+        if (caller == null) continue;
+
+        // Always show a notification banner (visible on any screen)
+        await NotificationService.showIncomingCallNotification(
+          callerName: caller.name,
+          callId: callId,
+          callerId: callerId,
+          isVideo: isVideo,
+        );
+
+        // If the user is already browsing the chat list, push IncomingCallScreen now
+        if (ChatListTracker.isActive && !_showingCallIds.contains(callId)) {
+          _showingCallIds.add(callId);
+          navigatorKey.currentState?.push(MaterialPageRoute(
+            builder: (_) => IncomingCallScreen(
+              callId: callId,
+              caller: caller,
+              callType: isVideo ? CallType.video : CallType.voice,
+              currentUid: _userId!,
+            ),
+          )).then((_) => _showingCallIds.remove(callId));
         }
       }
     });
+  }
+
+  // Called by ChatListScreen on open — finds any still-ringing call and pushes
+  // IncomingCallScreen. Handles the case where the call arrived before the user
+  // navigated to the chat list.
+  Future<void> showPendingCallIfRinging() async {
+    if (_callService.isInCall || _userId == null) return;
+    final snap = await FirebaseFirestore.instance
+        .collection('calls')
+        .where('calleeId', isEqualTo: _userId)
+        .where('status', isEqualTo: 'ringing')
+        .limit(1)
+        .get();
+    if (snap.docs.isEmpty) return;
+    final doc = snap.docs.first;
+    final callId = doc.id;
+    if (_showingCallIds.contains(callId)) return;
+    _showingCallIds.add(callId);
+
+    final data = doc.data();
+    final callerId = data['callerId'] as String;
+    final isVideo = data['type'] == 'video';
+    final caller = await _chatService.getUserProfile(callerId);
+    if (caller == null) {
+      _showingCallIds.remove(callId);
+      return;
+    }
+    navigatorKey.currentState?.push(MaterialPageRoute(
+      builder: (_) => IncomingCallScreen(
+        callId: callId,
+        caller: caller,
+        callType: isVideo ? CallType.video : CallType.voice,
+        currentUid: _userId!,
+      ),
+    )).then((_) => _showingCallIds.remove(callId));
+  }
+
+  // ── Call notification handlers ────────────────────────────────────────────
+  void _setupCallNotificationHandlers() {
+    // Incoming call notification tap → pop everything back to the calendar home screen.
+    // The user then navigates to the chat list where IncomingCallScreen auto-appears.
+    NotificationService.onCallNotificationTap = (_) {
+      navigatorKey.currentState?.popUntil((route) => route.isFirst);
+    };
+
+    // Ongoing call notification tap → return to active voice call
+    NotificationService.onOngoingCallNotificationTap = _returnToActiveCall;
+
+    // Background FCM tap → same: go to home screen
+    FirebaseMessaging.onMessageOpenedApp.listen((msg) {
+      if (msg.data['type'] == 'incoming_call') {
+        navigatorKey.currentState?.popUntil((route) => route.isFirst);
+      }
+    });
+
+    // Killed-state launch → open app at home; user navigates to chat list
+    NotificationService.getCallLaunchData().then((_) {});
+  }
+
+  void _returnToActiveCall() {
+    if (!_callService.isInCall) return;
+    final otherUser = _callService.minimizedOtherUser;
+    final callType = _callService.minimizedCallType;
+    final currentUid = _callService.minimizedCurrentUid;
+    final isOutgoing = _callService.minimizedIsOutgoing;
+    final callId = _callService.activeCallId;
+    if (otherUser == null || callType == null || currentUid == null ||
+        isOutgoing == null || callId == null) return;
+    navigatorKey.currentState?.push(MaterialPageRoute(
+      builder: (_) => CallScreen(
+        callId: callId,
+        isOutgoing: isOutgoing,
+        callType: callType,
+        otherUser: otherUser,
+        currentUid: currentUid,
+        isRestoring: true,
+      ),
+    ));
   }
 
   @override
   void dispose() {
     _notesSub?.cancel();
     _expensesSub?.cancel();
-    _chatNotifSub?.cancel();
+    _incomingCallSub?.cancel();
     super.dispose();
   }
 }

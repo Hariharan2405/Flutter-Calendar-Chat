@@ -23,7 +23,18 @@ class _ChatListScreenState extends State<ChatListScreen> {
   @override
   void initState() {
     super.initState();
+    ChatListTracker.isActive = true;
     _loadProfile();
+    // Check Firestore for any call that arrived before we opened this screen
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) context.read<AppProvider>().showPendingCallIfRinging();
+    });
+  }
+
+  @override
+  void dispose() {
+    ChatListTracker.isActive = false;
+    super.dispose();
   }
 
   Future<void> _loadProfile() async {

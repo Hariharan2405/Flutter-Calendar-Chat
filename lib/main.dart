@@ -7,17 +7,30 @@ import 'providers/app_provider.dart';
 import 'screens/home_screen.dart';
 import 'constants/app_theme.dart';
 import 'services/notification_service.dart';
+import 'services/system_services.dart';
+
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 // Must be top-level — runs in a separate isolate when app is killed/background
 @pragma('vm:entry-point')
 Future<void> _onBackgroundMessage(RemoteMessage message) async {
+  // Only handle incoming_call — it is a data-only message that Android won't
+  // auto-display. Chat messages carry a notification field that Android already
+  // shows automatically; handling them here would create a duplicate notification.
+  if (message.data['type'] != 'incoming_call') return;
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   await NotificationService.init();
-  await NotificationService.showFcmNotification(message);
+  await NotificationService.showIncomingCallNotification(
+    callerName: message.data['callerName'] ?? 'Unknown',
+    callId: message.data['callId'] ?? '',
+    callerId: message.data['callerId'] ?? '',
+    isVideo: message.data['callType'] == 'video',
+  );
 }
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  SystemServices.initialize();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
   // Register background/killed handler before runApp
@@ -43,6 +56,7 @@ class MyApp extends StatelessWidget {
         title: 'Calendar',
         theme: AppTheme.lightTheme,
         debugShowCheckedModeBanner: false,
+        navigatorKey: navigatorKey,
         home: const AppShell(),
       ),
     );
