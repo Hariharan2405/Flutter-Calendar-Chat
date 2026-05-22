@@ -8,6 +8,7 @@ import '../constants/app_theme.dart';
 import '../constants/expense_categories.dart';
 import '../screens/admin_chat_screen.dart';
 import '../screens/chat_list_screen.dart';
+import '../utils/snack_util.dart';
 import 'expense_summary_card.dart';
 
 class ExpenseSection extends StatelessWidget {
@@ -279,7 +280,13 @@ class ExpenseSection extends StatelessWidget {
         return _ExpenseCard(
           expense: e,
           onEdit: () => _showExpenseDialog(context, provider, expense: e),
-          onDelete: () => provider.deleteExpense(e.id),
+          onDelete: () async {
+          try {
+            await provider.deleteExpense(e.id);
+          } catch (_) {
+            if (context.mounted) context.showError('Failed to delete expense');
+          }
+        },
         );
       },
     );
@@ -353,7 +360,7 @@ class _ExpenseCard extends StatelessWidget {
           width: 40,
           height: 40,
           decoration: BoxDecoration(
-            color: cat.color.withOpacity(0.15),
+            color: cat.color.withValues(alpha: 0.15),
             borderRadius: BorderRadius.circular(10),
           ),
           child: Icon(cat.icon, color: cat.color, size: 20),
@@ -371,7 +378,7 @@ class _ExpenseCard extends StatelessWidget {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
-                color: cat.color.withOpacity(0.1),
+                color: cat.color.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
@@ -587,7 +594,7 @@ class _ExpenseDialogState extends State<_ExpenseDialog> {
                       width: 70,
                       margin: const EdgeInsets.only(right: 8),
                       decoration: BoxDecoration(
-                        color: selected ? cat.color.withOpacity(0.15) : AppColors.background,
+                        color: selected ? cat.color.withValues(alpha: 0.15) : AppColors.background,
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(
                           color: selected ? cat.color : AppColors.divider,
@@ -651,7 +658,7 @@ class _ExpenseDialogState extends State<_ExpenseDialog> {
         await Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => AdminChatScreen(excludeUid: widget.provider.userId!),
+            builder: (_) => AdminChatScreen(excludeUid: widget.provider.chatUserId),
           ),
         );
       }
@@ -673,23 +680,31 @@ class _ExpenseDialogState extends State<_ExpenseDialog> {
     if (amount == null || amount <= 0) return;
 
     final provider = widget.provider;
-    if (widget.expense != null) {
-      await provider.updateExpense(
-        widget.expense!.copyWith(
+    final isEdit = widget.expense != null;
+    try {
+      if (isEdit) {
+        await provider.updateExpense(
+          widget.expense!.copyWith(
+            amount: amount,
+            categoryId: _selectedCategory,
+            description: desc,
+          ),
+        );
+      } else {
+        await provider.addExpense(
           amount: amount,
           categoryId: _selectedCategory,
           description: desc,
-        ),
-      );
-    } else {
-      await provider.addExpense(
-        amount: amount,
-        categoryId: _selectedCategory,
-        description: desc,
-        date: _selectedDate,
-      );
+          date: _selectedDate,
+        );
+      }
+      if (mounted) {
+        Navigator.pop(context);
+        context.showSuccess(isEdit ? 'Expense updated' : 'Expense saved');
+      }
+    } catch (_) {
+      if (mounted) context.showError(isEdit ? 'Failed to update expense' : 'Failed to save expense');
     }
-    if (mounted) Navigator.pop(context);
   }
 
   @override

@@ -23,7 +23,8 @@
         android:label="Calendar"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:roundIcon="@drawable/ic_launcher_round">
+        android:roundIcon="@drawable/ic_launcher_round"
+        android:extractNativeLibs="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"

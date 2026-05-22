@@ -9,8 +9,8 @@ class NotificationService {
 
   static const _channelId = 'tn_calendar_chat';
   static const _channelName = 'Calendar';
-  // v2 uses system ringtone — channel sound can't be changed after creation
-  static const _callChannelId = 'tn_calendar_call_v2';
+  // v4 channel: fresh creation with system ringtone URI (falls back to default sound on failure)
+  static const _callChannelId = 'tn_calendar_call_v4';
   static const _callChannelName = 'Incoming Calls';
   static const _ongoingChannelId = 'tn_calendar_ongoing';
   static const _ongoingChannelName = 'Active Call';
@@ -39,17 +39,29 @@ class NotificationService {
       ),
     );
 
-    await androidPlugin?.createNotificationChannel(
-      const AndroidNotificationChannel(
-        _callChannelId,
-        _callChannelName,
-        importance: Importance.max,
-        playSound: true,
-        enableVibration: true,
-        // System default ringtone (not message tone)
-        sound: UriAndroidNotificationSound('content://settings/system/ringtone'),
-      ),
-    );
+    // Try system ringtone URI; fall back to default sound if the URI is unsupported.
+    try {
+      await androidPlugin?.createNotificationChannel(
+        const AndroidNotificationChannel(
+          _callChannelId,
+          _callChannelName,
+          importance: Importance.max,
+          playSound: true,
+          enableVibration: true,
+          sound: UriAndroidNotificationSound('content://settings/system/ringtone'),
+        ),
+      );
+    } catch (_) {
+      await androidPlugin?.createNotificationChannel(
+        const AndroidNotificationChannel(
+          _callChannelId,
+          _callChannelName,
+          importance: Importance.max,
+          playSound: true,
+          enableVibration: true,
+        ),
+      );
+    }
 
     await androidPlugin?.createNotificationChannel(
       const AndroidNotificationChannel(
@@ -136,7 +148,6 @@ class NotificationService {
         priority: Priority.max,
         fullScreenIntent: true,
         playSound: true,
-        sound: UriAndroidNotificationSound('content://settings/system/ringtone'),
         enableVibration: true,
         category: AndroidNotificationCategory.call,
         ongoing: true,

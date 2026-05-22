@@ -104,13 +104,17 @@ class ChatService {
 
   Stream<List<MessageModel>> messages(String uid1, String uid2) {
     final id = chatId(uid1, uid2);
+    final cutoff = DateTime.now().subtract(const Duration(days: 7));
     return _db
         .collection('chats')
         .doc(id)
         .collection('messages')
         .orderBy('timestamp', descending: false)
         .snapshots()
-        .map((snap) => snap.docs.map(MessageModel.fromFirestore).toList());
+        .map((snap) => snap.docs
+            .map(MessageModel.fromFirestore)
+            .where((m) => m.timestamp.isAfter(cutoff))
+            .toList());
   }
 
   Stream<Map<String, dynamic>?> chatData(String uid1, String uid2) {
@@ -132,7 +136,37 @@ class ChatService {
 
   Future<void> resetUnread(String uid1, String uid2) async {
     final id = chatId(uid1, uid2);
-    await _db.collection('chats').doc(id).update({'unread_$uid1': 0});
+    try {
+      await _db.collection('chats').doc(id).update({'unread_$uid1': 0});
+    } catch (_) {}
+  }
+
+  Future<void> markRead(String uid1, String uid2, String currentUid) {
+    return _updateChatMeta(chatId(uid1, uid2), {
+      'unread_$currentUid': 0,
+      'lastReadAt_$currentUid': Timestamp.now(),
+    });
+  }
+
+  Future<void> markDelivered(String chatDocId, String currentUid) {
+    return _updateChatMeta(chatDocId, {
+      'lastDeliveredAt_$currentUid': Timestamp.now(),
+    });
+  }
+
+  Stream<UserProfileModel?> watchUserProfile(String uid) {
+    return _db
+        .collection('user_profiles')
+        .doc(uid)
+        .snapshots()
+        .map((doc) => doc.exists ? UserProfileModel.fromFirestore(doc) : null);
+  }
+
+  Future<void> _updateChatMeta(
+      String chatDocId, Map<String, dynamic> data) async {
+    try {
+      await _db.collection('chats').doc(chatDocId).update(data);
+    } catch (_) {}
   }
 
   // ── Send Messages ─────────────────────────────────────────────────────────
@@ -168,7 +202,7 @@ class ChatService {
         .doc(msgId)
         .set(msg.toFirestore());
 
-    await _db.collection('chats').doc(id).update({
+    _updateChatMeta(id, {
       'lastMessage': text,
       'lastSenderId': senderUid,
       'lastMessageTime': Timestamp.fromDate(now),
@@ -212,7 +246,7 @@ class ChatService {
         .doc(msgId)
         .set(msg.toFirestore());
 
-    await _db.collection('chats').doc(id).update({
+    _updateChatMeta(id, {
       'lastMessage': '📷 Image',
       'lastSenderId': senderUid,
       'lastMessageTime': Timestamp.fromDate(now),
@@ -251,7 +285,7 @@ class ChatService {
         .doc(msgId)
         .set(msg.toFirestore());
 
-    await _db.collection('chats').doc(id).update({
+    _updateChatMeta(id, {
       'lastMessage': '🎞️ GIF',
       'lastSenderId': senderUid,
       'lastMessageTime': Timestamp.fromDate(now),
@@ -290,7 +324,7 @@ class ChatService {
         .doc(msgId)
         .set(msg.toFirestore());
 
-    await _db.collection('chats').doc(id).update({
+    _updateChatMeta(id, {
       'lastMessage': sticker,
       'lastSenderId': senderUid,
       'lastMessageTime': Timestamp.fromDate(now),
@@ -329,7 +363,7 @@ class ChatService {
         .doc(msgId)
         .set(msg.toFirestore());
 
-    await _db.collection('chats').doc(id).update({
+    _updateChatMeta(id, {
       'lastMessage': '🎤 Voice message',
       'lastSenderId': senderUid,
       'lastMessageTime': Timestamp.fromDate(now),

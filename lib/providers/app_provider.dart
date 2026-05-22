@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../main.dart' show navigatorKey;
 import '../models/note_model.dart';
 import '../models/expense_model.dart';
@@ -15,8 +16,11 @@ import '../services/expense_service.dart';
 import '../services/notification_service.dart';
 import '../screens/call_screen.dart';
 import '../screens/incoming_call_screen.dart';
+import '../screens/chat_detail_screen.dart';
 
 enum ExpenseViewMode { day, week, month, year, custom }
+
+const _activeProfileUidKey = 'active_profile_uid';
 
 // Set to true while ChatListScreen is on screen so incoming calls
 // auto-push IncomingCallScreen without requiring a notification tap.
@@ -32,8 +36,12 @@ class AppProvider extends ChangeNotifier {
   final CallService _callService = CallService();
 
   StreamSubscription<QuerySnapshot>? _incomingCallSub;
+  StreamSubscription<QuerySnapshot>? _chatDeliverySub;
   // Tracks callIds currently being shown in IncomingCallScreen to avoid duplicates
   final Set<String> _showingCallIds = {};
+  // Tracks "chatId:messageTimestamp" pairs already marked delivered this session
+  // to prevent the write→snapshot→write infinite loop
+  final Set<String> _deliveredKeys = {};
 
   String? _userId;
   UserProfileModel? _profile;
@@ -56,6 +64,8 @@ class AppProvider extends ChangeNotifier {
 
   // ── Getters ──────────────────────────────────────────────────────────────────
   String? get userId => _userId;
+  // The UID used for all chat/call operations — profile UID on cross-device login
+  String get chatUserId => _profile?.uid ?? _userId!;
   UserProfileModel? get profile => _profile;
   bool get profileReady => _profile != null;
   String? get errorMessage => _errorMessage;
@@ -86,11 +96,21 @@ class AppProvider extends ChangeNotifier {
           '• Internet connection is available',
         ),
       );
+      // Load profile FIRST so chatUserId is correct before subscribing to user data.
+      // Notes/expenses are stored under the profile UID, not the device's anonymous UID,
+      // so this must be resolved before subscribing to avoid showing an empty collection.
+      final prefs = await SharedPreferences.getInstance();
+      final savedProfileUid = prefs.getString(_activeProfileUidKey);
+      if (savedProfileUid != null) {
+        _profile = await _chatService.getUserProfile(savedProfileUid);
+        if (_profile == null) await prefs.remove(_activeProfileUidKey);
+      }
+      _profile ??= await _chatService.getUserProfile(_userId!);
       await _refreshMetadata();
       _subscribeNotes();
       _subscribeExpenses();
       _listenForIncomingCalls();
-      _profile = await _chatService.getUserProfile(_userId!);
+      _listenForChatDelivery();
       unawaited(_saveFcmToken());
       _setupCallNotificationHandlers();
       _isLoading = false;
@@ -121,26 +141,67 @@ class AppProvider extends ChangeNotifier {
   Future<void> createProfile(String name, String password) async {
     if (_userId == null) return;
     await _chatService.saveUserProfile(_userId!, name, password);
+    // Link anonymous auth to email/password so the same UID is restored after reinstall.
+    await _authService.linkProfileCredential(name, password);
     _profile = await _chatService.getUserProfile(_userId!);
     notifyListeners();
   }
 
-  Future<void> loginWithExistingProfile(UserProfileModel existing) async {
-    _profile = existing;
-    notifyListeners();
-    // Update FCM token on the existing profile doc so this device gets notifications
-    final token = await NotificationService.getToken();
-    if (token != null) {
-      await FirebaseFirestore.instance
-          .collection('user_profiles')
-          .doc(existing.uid)
-          .update({'fcmToken': token});
+  /// Returns true if profile update succeeded, false otherwise.
+  Future<bool> loginWithExistingProfile(UserProfileModel existing) async {
+    // Try to restore the original Firebase UID via email/password auth linkage.
+    // This prevents a new anonymous UID from being created on each reinstall.
+    if (existing.password != null) {
+      try {
+        final restoredUid = await _authService.signInWithProfile(
+          existing.name, existing.password!,
+        );
+        if (restoredUid != null) _userId = restoredUid;
+      } catch (_) {}
     }
+
+    _profile = existing;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_activeProfileUidKey, existing.uid);
+
+    // Restart listeners so they use the correct (possibly restored) chatUserId.
+    _listenForIncomingCalls();
+    _listenForChatDelivery();
+
+    // Re-subscribe to notes/expenses using the profile UID (chatUserId is now existing.uid)
+    _subscribeNotes();
+    _subscribeExpenses();
+    unawaited(_refreshMetadata());
+    notifyListeners();
+
+    bool success = true;
+    final token = await NotificationService.getToken();
+    try {
+      final updateData = <String, dynamic>{};
+      if (token != null) updateData['fcmToken'] = token;
+      // Write currentAuthUid as fallback for old profiles not yet linked via email/password.
+      if (_userId != null && _userId != existing.uid) {
+        updateData['currentAuthUid'] = _userId;
+      }
+      if (updateData.isNotEmpty) {
+        await FirebaseFirestore.instance
+            .collection('user_profiles')
+            .doc(existing.uid)
+            .update(updateData);
+      }
+      // If email/password auth isn't linked yet (old profile), link it now.
+      if (existing.password != null && _userId != existing.uid) {
+        await _authService.linkProfileCredential(existing.name, existing.password!);
+      }
+    } catch (_) {
+      success = false;
+    }
+    return success;
   }
 
   Future<void> _refreshMetadata() async {
-    _datesWithNotes = await _notesService.getDatesWithNotes(_userId!);
-    _datesWithExpenses = await _expenseService.getDatesWithExpenses(_userId!);
+    _datesWithNotes = await _notesService.getDatesWithNotes(chatUserId);
+    _datesWithExpenses = await _expenseService.getDatesWithExpenses(chatUserId);
     notifyListeners();
   }
 
@@ -206,10 +267,16 @@ class AppProvider extends ChangeNotifier {
     _notesSub?.cancel();
     if (_userId == null) return;
     final dateKey = NoteModel.dateToKey(_selectedDate);
-    _notesSub = _notesService.notesForDate(_userId!, dateKey).listen((notes) {
-      _notesForSelectedDate = notes;
-      notifyListeners();
-    });
+    _notesSub = _notesService.notesForDate(chatUserId, dateKey).listen(
+      (notes) {
+        _notesForSelectedDate = notes;
+        notifyListeners();
+      },
+      onError: (_) {
+        _notesForSelectedDate = [];
+        notifyListeners();
+      },
+    );
   }
 
   // ── Expenses subscription ─────────────────────────────────────────────────────
@@ -218,17 +285,23 @@ class AppProvider extends ChangeNotifier {
     if (_userId == null) return;
     final range = _rangeForMode();
     _expensesSub = _expenseService
-        .expensesInRange(_userId!, range.start, range.end)
-        .listen((expenses) {
-      _expenses = expenses;
-      notifyListeners();
-    });
+        .expensesInRange(chatUserId, range.start, range.end)
+        .listen(
+      (expenses) {
+        _expenses = expenses;
+        notifyListeners();
+      },
+      onError: (_) {
+        _expenses = [];
+        notifyListeners();
+      },
+    );
   }
 
   // ── CRUD Notes ────────────────────────────────────────────────────────────────
   Future<void> addNote(String title, String content) async {
     await _notesService.addNote(
-      userId: _userId!,
+      userId: chatUserId,
       date: _selectedDate,
       title: title,
       content: content,
@@ -237,11 +310,11 @@ class AppProvider extends ChangeNotifier {
   }
 
   Future<void> updateNote(NoteModel note) async {
-    await _notesService.updateNote(_userId!, note);
+    await _notesService.updateNote(chatUserId, note);
   }
 
   Future<void> deleteNote(String noteId) async {
-    await _notesService.deleteNote(_userId!, noteId);
+    await _notesService.deleteNote(chatUserId, noteId);
     await _refreshMetadata();
   }
 
@@ -253,7 +326,7 @@ class AppProvider extends ChangeNotifier {
     DateTime? date,
   }) async {
     await _expenseService.addExpense(
-      userId: _userId!,
+      userId: chatUserId,
       date: date ?? _selectedDate,
       amount: amount,
       categoryId: categoryId,
@@ -263,11 +336,11 @@ class AppProvider extends ChangeNotifier {
   }
 
   Future<void> updateExpense(ExpenseModel expense) async {
-    await _expenseService.updateExpense(_userId!, expense);
+    await _expenseService.updateExpense(chatUserId, expense);
   }
 
   Future<void> deleteExpense(String expenseId) async {
-    await _expenseService.deleteExpense(_userId!, expenseId);
+    await _expenseService.deleteExpense(chatUserId, expenseId);
     await _refreshMetadata();
   }
 
@@ -276,7 +349,7 @@ class AppProvider extends ChangeNotifier {
     if (_userId == null) return;
     final token = await NotificationService.getToken();
     if (token == null) return;
-    final ref = FirebaseFirestore.instance.collection('user_profiles').doc(_userId);
+    final ref = FirebaseFirestore.instance.collection('user_profiles').doc(chatUserId);
     // Use update() so we never create a partial document for users who haven't
     // set their name yet — update() is a no-op (throws) if the doc doesn't exist.
     try {
@@ -294,30 +367,32 @@ class AppProvider extends ChangeNotifier {
     if (_userId == null) return;
     _incomingCallSub?.cancel();
     _incomingCallSub =
-        _callService.incomingCallsFor(_userId!).listen((snap) async {
+        _callService.incomingCallsFor(chatUserId).listen((snap) async {
       for (final change in snap.docChanges) {
         if (change.type != DocumentChangeType.added) continue;
         if (_callService.isInCall) continue;
 
         final data = change.doc.data() as Map<String, dynamic>;
         final status = data['status'] as String?;
-        if (status != 'ringing') continue;
+        if (status != 'calling' && status != 'ringing') continue;
         final callId = change.doc.id;
+
+        // Tell the caller our device received the call (shows "Ringing..." on their end)
+        if (status == 'calling') {
+          FirebaseFirestore.instance
+              .collection('calls')
+              .doc(callId)
+              .update({'status': 'ringing'}).ignore();
+        }
         final callerId = data['callerId'] as String;
         final isVideo = data['type'] == 'video';
 
         final caller = await _chatService.getUserProfile(callerId);
         if (caller == null) continue;
 
-        // Always show a notification banner (visible on any screen)
-        await NotificationService.showIncomingCallNotification(
-          callerName: caller.name,
-          callId: callId,
-          callerId: callerId,
-          isVideo: isVideo,
-        );
-
-        // If the user is already browsing the chat list, push IncomingCallScreen now
+        // Only show IncomingCallScreen when user is in the chat section.
+        // If on home/calendar, the notification is the only signal; user taps it
+        // to go home, then navigates to chat where showPendingCallIfRinging() fires.
         if (ChatListTracker.isActive && !_showingCallIds.contains(callId)) {
           _showingCallIds.add(callId);
           navigatorKey.currentState?.push(MaterialPageRoute(
@@ -325,10 +400,42 @@ class AppProvider extends ChangeNotifier {
               callId: callId,
               caller: caller,
               callType: isVideo ? CallType.video : CallType.voice,
-              currentUid: _userId!,
+              currentUid: chatUserId,
             ),
           )).then((_) => _showingCallIds.remove(callId));
         }
+
+        // Always show the notification (fire-and-forget).
+        NotificationService.showIncomingCallNotification(
+          callerName: caller.name,
+          callId: callId,
+          callerId: callerId,
+          isVideo: isVideo,
+        ).ignore();
+      }
+    });
+  }
+
+  void _listenForChatDelivery() {
+    _chatDeliverySub?.cancel();
+    _deliveredKeys.clear();
+    _chatDeliverySub = _chatService.allChatsFor(chatUserId).listen((snap) {
+      for (final change in snap.docChanges) {
+        if (change.type == DocumentChangeType.removed) continue;
+        final data = change.doc.data() as Map<String, dynamic>?;
+        if (data == null) continue;
+        final lastSenderId = data['lastSenderId'] as String?;
+        if (lastSenderId == null || lastSenderId.isEmpty || lastSenderId == chatUserId) continue;
+        final chatDocId = change.doc.id;
+        if (ActiveChatTracker.activeChatId == chatDocId) continue;
+        // Deduplicate: markDelivered writes to the chat doc which re-triggers
+        // this listener. Track which (chat, message) pairs we already handled
+        // so we don't loop endlessly.
+        final lastMsgTime = data['lastMessageTime'] as Timestamp?;
+        final key = '$chatDocId:${lastMsgTime?.millisecondsSinceEpoch ?? 0}';
+        if (_deliveredKeys.contains(key)) continue;
+        _deliveredKeys.add(key);
+        _chatService.markDelivered(chatDocId, chatUserId).ignore();
       }
     });
   }
@@ -340,8 +447,8 @@ class AppProvider extends ChangeNotifier {
     if (_callService.isInCall || _userId == null) return;
     final snap = await FirebaseFirestore.instance
         .collection('calls')
-        .where('calleeId', isEqualTo: _userId)
-        .where('status', isEqualTo: 'ringing')
+        .where('calleeId', isEqualTo: chatUserId)
+        .where('status', whereIn: ['calling', 'ringing'])
         .limit(1)
         .get();
     if (snap.docs.isEmpty) return;
@@ -363,7 +470,7 @@ class AppProvider extends ChangeNotifier {
         callId: callId,
         caller: caller,
         callType: isVideo ? CallType.video : CallType.voice,
-        currentUid: _userId!,
+        currentUid: chatUserId,
       ),
     )).then((_) => _showingCallIds.remove(callId));
   }
@@ -371,7 +478,6 @@ class AppProvider extends ChangeNotifier {
   // ── Call notification handlers ────────────────────────────────────────────
   void _setupCallNotificationHandlers() {
     // Incoming call notification tap → pop everything back to the calendar home screen.
-    // The user then navigates to the chat list where IncomingCallScreen auto-appears.
     NotificationService.onCallNotificationTap = (_) {
       navigatorKey.currentState?.popUntil((route) => route.isFirst);
     };
@@ -416,6 +522,7 @@ class AppProvider extends ChangeNotifier {
     _notesSub?.cancel();
     _expensesSub?.cancel();
     _incomingCallSub?.cancel();
+    _chatDeliverySub?.cancel();
     super.dispose();
   }
 }

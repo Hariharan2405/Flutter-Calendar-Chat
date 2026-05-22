@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
 import 'package:flutter/material.dart';
@@ -17,6 +18,7 @@ import '../models/user_profile_model.dart';
 import '../models/message_model.dart';
 import '../models/call_model.dart';
 import '../constants/app_theme.dart';
+import '../utils/snack_util.dart';
 import '../widgets/voice_preview_sheet.dart';
 import '../widgets/image_preview_sheet.dart';
 import '../widgets/gif_picker_sheet.dart';
@@ -51,6 +53,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   final AudioPlayer _player = AudioPlayer();
   final ImagePicker _imagePicker = ImagePicker();
 
+  late final Stream<List<MessageModel>> _messagesStream;
+
   bool _isRecording = false;
   bool _isSending = false;
   bool _showEmojiPicker = false;
@@ -59,6 +63,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   int _recordingSeconds = 0;
   Timer? _recordingTimer;
   MessageModel? _replyingTo;
+  Map<String, dynamic>? _chatData;
+  StreamSubscription<Map<String, dynamic>?>? _chatDataSub;
+  UserProfileModel? _otherUserLive;
+  StreamSubscription<UserProfileModel?>? _otherUserSub;
+  Timer? _lastSeenTimer;
 
   double _dragStartY = 0;
   bool _recordingStartedByDrag = false;
@@ -74,8 +83,25 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   @override
   void initState() {
     super.initState();
+    _messagesStream = _chatService.messages(widget.currentUid, widget.otherUser.uid);
     ActiveChatTracker.activeChatId = _chatId;
-    _chatService.resetUnread(widget.currentUid, widget.otherUser.uid);
+    _otherUserLive = widget.otherUser;
+
+    _chatDataSub = _chatService.chatData(widget.currentUid, widget.otherUser.uid).listen(
+      (data) { if (mounted) setState(() => _chatData = data); },
+    );
+
+    _otherUserSub = _chatService.watchUserProfile(widget.otherUser.uid).listen(
+      (profile) { if (mounted && profile != null) setState(() => _otherUserLive = profile); },
+    );
+
+    _chatService.markRead(widget.currentUid, widget.otherUser.uid, widget.currentUid);
+    _chatService.updateOnReturn(widget.currentUid);
+
+    _lastSeenTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _chatService.updateOnReturn(widget.currentUid);
+    });
+
     _player.onPlayerComplete.listen((_) {
       if (mounted) setState(() => _playingMessageId = null);
     });
@@ -273,24 +299,42 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         title: Row(
           children: [
             GestureDetector(
-              onTap: widget.otherUser.photoUrl != null
-                  ? () => _viewFullImage(widget.otherUser.photoUrl!)
+              onTap: (_otherUserLive ?? widget.otherUser).photoUrl != null
+                  ? () => _viewFullImage((_otherUserLive ?? widget.otherUser).photoUrl!)
                   : null,
-              child: CircleAvatar(
-                radius: 18,
-                backgroundColor: Colors.white.withValues(alpha: 0.25),
-                backgroundImage: widget.otherUser.photoUrl != null
-                    ? CachedNetworkImageProvider(widget.otherUser.photoUrl!)
-                    : null,
-                child: widget.otherUser.photoUrl == null
-                    ? Text(
-                        widget.otherUser.name[0].toUpperCase(),
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16),
-                      )
-                    : null,
+              child: Stack(
+                children: [
+                  CircleAvatar(
+                    radius: 18,
+                    backgroundColor: Colors.white.withValues(alpha: 0.25),
+                    backgroundImage: (_otherUserLive ?? widget.otherUser).photoUrl != null
+                        ? CachedNetworkImageProvider((_otherUserLive ?? widget.otherUser).photoUrl!)
+                        : null,
+                    child: (_otherUserLive ?? widget.otherUser).photoUrl == null
+                        ? Text(
+                            widget.otherUser.name[0].toUpperCase(),
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16),
+                          )
+                        : null,
+                  ),
+                  if (_isOtherOnline)
+                    Positioned(
+                      right: 0,
+                      bottom: 0,
+                      child: Container(
+                        width: 11,
+                        height: 11,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF4CAF50),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: AppColors.primary, width: 1.5),
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
             const SizedBox(width: 10),
@@ -301,8 +345,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     style: const TextStyle(
                         fontSize: 16, fontWeight: FontWeight.w700)),
                 Text(
-                  'Last seen ${_formatLastSeen(widget.otherUser.lastSeen)}',
-                  style: const TextStyle(fontSize: 11, color: Colors.white70),
+                  _onlineStatusText,
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: _isOtherOnline
+                          ? const Color(0xFF80E27E)
+                          : Colors.white70),
                 ),
               ],
             ),
@@ -347,12 +395,28 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
   Widget _buildMessageList() {
     return StreamBuilder<List<MessageModel>>(
-      stream: _chatService.messages(widget.currentUid, widget.otherUser.uid),
+      stream: _messagesStream,
       builder: (ctx, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
         }
-        final messages = snap.data ?? [];
+        // Auto-mark as read when new messages from other person arrive while chat is open
+        if (snap.hasData && snap.data!.isNotEmpty) {
+          final myLastRead = _parseTimestamp(_chatData?['lastReadAt_${widget.currentUid}']);
+          final hasUnread = snap.data!.any((m) =>
+              m.senderId != widget.currentUid &&
+              (myLastRead == null || m.timestamp.isAfter(myLastRead)));
+          if (hasUnread) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) {
+                _chatService.markRead(
+                    widget.currentUid, widget.otherUser.uid, widget.currentUid);
+              }
+            });
+          }
+        }
+        // Reverse so newest is at index 0 — ListView reverse:true shows index 0 at bottom
+        final messages = (snap.data ?? []).reversed.toList();
         if (messages.isEmpty) {
           return Center(
             child: Column(
@@ -371,32 +435,25 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           );
         }
 
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_scrollCtrl.hasClients) {
-            _scrollCtrl.animateTo(
-              _scrollCtrl.position.maxScrollExtent,
-              duration: const Duration(milliseconds: 200),
-              curve: Curves.easeOut,
-            );
-          }
-        });
-
         return ListView.builder(
           controller: _scrollCtrl,
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+          reverse: true,
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
           itemCount: messages.length,
           itemBuilder: (ctx, i) {
             final msg = messages[i];
             final isMe = msg.senderId == widget.currentUid;
-            final showDate =
-                i == 0 || !_isSameDay(messages[i - 1].timestamp, msg.timestamp);
+            // In reversed list: messages[i+1] is chronologically older.
+            // Show date header above the oldest message of each day.
+            final showDate = i == messages.length - 1 ||
+                !_isSameDay(messages[i].timestamp, messages[i + 1].timestamp);
             return Column(
               children: [
-                if (showDate) _buildDateDivider(msg.timestamp),
                 _SwipeToReply(
                   onReply: () => setState(() => _replyingTo = msg),
                   child: _buildBubble(msg, isMe),
                 ),
+                if (showDate) _buildDateDivider(msg.timestamp),
               ],
             );
           },
@@ -549,6 +606,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                         ? Colors.white.withValues(alpha: 0.7)
                         : AppColors.textSecondary),
               ),
+              if (isMe) ...[
+                const SizedBox(width: 3),
+                _buildTickIcon(msg),
+              ],
             ],
           ),
         ],
@@ -602,10 +663,18 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               color: Colors.black45,
               borderRadius: BorderRadius.circular(10),
             ),
-            child: Text(
-              DateFormat('HH:mm').format(msg.timestamp),
-              style:
-                  const TextStyle(fontSize: 10, color: Colors.white),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  DateFormat('HH:mm').format(msg.timestamp),
+                  style: const TextStyle(fontSize: 10, color: Colors.white),
+                ),
+                if (isMe) ...[
+                  const SizedBox(width: 3),
+                  _buildTickIcon(msg),
+                ],
+              ],
             ),
           ),
         ),
@@ -843,6 +912,15 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                       minLines: 1,
                       maxLines: 4,
                       textCapitalization: TextCapitalization.sentences,
+                      contentInsertionConfiguration: ContentInsertionConfiguration(
+                        allowedMimeTypes: const [
+                          'image/gif',
+                          'image/jpeg',
+                          'image/png',
+                          'image/webp',
+                        ],
+                        onContentInserted: _onKeyboardContentInserted,
+                      ),
                     ),
                   ),
                   // Attach button
@@ -1057,6 +1135,29 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     );
   }
 
+  Future<void> _onKeyboardContentInserted(KeyboardInsertedContent content) async {
+    final bytes = content.data;
+    if (bytes == null || !mounted || _isSending) return;
+    setState(() => _isSending = true);
+    try {
+      final dir = await getTemporaryDirectory();
+      final ext = content.mimeType.split('/').last.split('+').first;
+      final file = File(
+          '${dir.path}/keyboard_${DateTime.now().millisecondsSinceEpoch}.$ext');
+      await file.writeAsBytes(bytes);
+      if (!mounted) return;
+      await _chatService.sendImageMessage(
+        senderUid: widget.currentUid,
+        receiverUid: widget.otherUser.uid,
+        imageFile: file,
+      );
+    } catch (_) {
+      if (mounted) context.showError('Failed to send media');
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
   Future<void> _pickImage(ImageSource source) async {
     final XFile? file =
         await _imagePicker.pickImage(source: source, imageQuality: 85);
@@ -1069,14 +1170,20 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       backgroundColor: Colors.transparent,
       builder: (_) => ImagePreviewSheet(
         imageFile: imageFile,
-        onSend: () => _chatService.sendImageMessage(
-          senderUid: widget.currentUid,
-          receiverUid: widget.otherUser.uid,
-          imageFile: imageFile,
-          replyToId: _replyingTo?.id,
-          replyToText: _replyToPreviewText(),
-          replyToSenderId: _replyingTo?.senderId,
-        ),
+        onSend: () async {
+          try {
+            await _chatService.sendImageMessage(
+              senderUid: widget.currentUid,
+              receiverUid: widget.otherUser.uid,
+              imageFile: imageFile,
+              replyToId: _replyingTo?.id,
+              replyToText: _replyToPreviewText(),
+              replyToSenderId: _replyingTo?.senderId,
+            );
+          } catch (_) {
+            if (mounted) context.showError('Failed to send image');
+          }
+        },
       ),
     ).then((_) {
       if (_replyingTo != null) setState(() => _replyingTo = null);
@@ -1102,7 +1209,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         replyToText: _replyToPreviewText(),
         replyToSenderId: _replyingTo?.senderId,
       );
-      setState(() => _replyingTo = null);
+      if (mounted) setState(() => _replyingTo = null);
+    } catch (_) {
+      if (mounted) context.showError('Failed to send GIF');
     } finally {
       if (mounted) setState(() => _isSending = false);
     }
@@ -1127,7 +1236,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         replyToText: _replyToPreviewText(),
         replyToSenderId: _replyingTo?.senderId,
       );
-      setState(() => _replyingTo = null);
+      if (mounted) setState(() => _replyingTo = null);
+    } catch (_) {
+      if (mounted) context.showError('Failed to send sticker');
     } finally {
       if (mounted) setState(() => _isSending = false);
     }
@@ -1305,6 +1416,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     );
   }
 
+  void _scrollToBottom() {
+    if (_scrollCtrl.hasClients) {
+      _scrollCtrl.jumpTo(0); // reverse:true → 0 = bottom
+    }
+  }
+
   Future<void> _sendText() async {
     final text = _textCtrl.text.trim();
     if (text.isEmpty) return;
@@ -1323,6 +1440,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         replyToText: _replyToPreviewText(msg: reply),
         replyToSenderId: reply?.senderId,
       );
+      _scrollToBottom();
+    } catch (_) {
+      if (mounted) context.showError('Failed to send message');
     } finally {
       if (mounted) setState(() => _isSending = false);
     }
@@ -1402,12 +1522,59 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  String _formatLastSeen(DateTime dt) {
-    final diff = DateTime.now().difference(dt);
-    if (diff.inMinutes < 2) return 'just now';
-    if (diff.inHours < 1) return '${diff.inMinutes}m ago';
-    if (diff.inDays < 1) return '${diff.inHours}h ago';
-    return DateFormat('d MMM').format(dt);
+  DateTime? _parseTimestamp(dynamic value) {
+    if (value is Timestamp) return value.toDate();
+    return null;
+  }
+
+  bool get _isOtherOnline {
+    final profile = _otherUserLive ?? widget.otherUser;
+    return DateTime.now().difference(profile.lastSeen).inMinutes < 2;
+  }
+
+  String get _onlineStatusText {
+    final profile = _otherUserLive ?? widget.otherUser;
+    final dt = profile.lastSeen;
+    final now = DateTime.now();
+    if (DateTime.now().difference(dt).inMinutes < 2) return 'Online';
+    if (_isSameDay(dt, now)) return 'last seen today at ${DateFormat('HH:mm').format(dt)}';
+    if (_isSameDay(dt, now.subtract(const Duration(days: 1)))) {
+      return 'last seen yesterday at ${DateFormat('HH:mm').format(dt)}';
+    }
+    return 'last seen ${DateFormat('d MMM').format(dt)}';
+  }
+
+  Widget _buildTickIcon(MessageModel msg) {
+    final otherUid = widget.otherUser.uid;
+    final lastReadAt = _parseTimestamp(_chatData?['lastReadAt_$otherUid']);
+    final lastDeliveredAt = _parseTimestamp(_chatData?['lastDeliveredAt_$otherUid']);
+
+    final isRead = lastReadAt != null && !msg.timestamp.isAfter(lastReadAt);
+    final isDelivered = lastDeliveredAt != null && !msg.timestamp.isAfter(lastDeliveredAt);
+
+    const readColor = Color(0xFF4FC3F7);
+    const pendingColor = Colors.white60;
+
+    if (isRead) {
+      return _doubleTick(readColor);
+    } else if (isDelivered) {
+      return _doubleTick(pendingColor);
+    } else {
+      return const Icon(Icons.check_rounded, size: 13, color: pendingColor);
+    }
+  }
+
+  Widget _doubleTick(Color color) {
+    return SizedBox(
+      width: 18,
+      height: 13,
+      child: Stack(
+        children: [
+          Positioned(left: 0, child: Icon(Icons.check_rounded, size: 13, color: color)),
+          Positioned(left: 5, child: Icon(Icons.check_rounded, size: 13, color: color)),
+        ],
+      ),
+    );
   }
 
   String _fmt(int s) =>
@@ -1419,6 +1586,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   @override
   void dispose() {
     ActiveChatTracker.activeChatId = null;
+    _chatDataSub?.cancel();
+    _otherUserSub?.cancel();
+    _lastSeenTimer?.cancel();
     _textCtrl.dispose();
     _scrollCtrl.dispose();
     _textFocus.dispose();

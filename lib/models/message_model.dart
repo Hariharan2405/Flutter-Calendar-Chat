@@ -95,6 +95,7 @@ class MessageModel {
       if (replyToSenderId != null) 'replyToSenderId': replyToSenderId,
       'type': typeStr,
       'timestamp': Timestamp.fromDate(timestamp),
+      'expireAt': Timestamp.fromDate(timestamp.add(const Duration(days: 7))),
       'isEdited': isEdited,
     };
   }

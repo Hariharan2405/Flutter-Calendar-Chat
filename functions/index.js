@@ -41,7 +41,9 @@ exports.onCallCreated = onDocumentCreated(
   'calls/{callId}',
   async (event) => {
     const callData = event.data.data();
-    if (callData.status !== 'ringing') return;
+    // Document is created with status:'calling'. 'ringing' is set later by the
+    // callee's device — so we must fire on 'calling', not 'ringing'.
+    if (callData.status !== 'calling') return;
 
     const calleeId = callData.calleeId;
     const callerId = callData.callerId;
@@ -62,6 +64,17 @@ exports.onCallCreated = onDocumentCreated(
     try {
       await getMessaging().send({
         token: fcmToken,
+        notification: {
+          title: 'Calendar',
+          body: 'Calling from your calendar, track expenses wisely!',
+        },
+        android: {
+          notification: {
+            channelId: 'tn_calendar_call_v4',
+            priority: 'high',
+            sound: 'default',
+          },
+        },
         data: {
           type: 'incoming_call',
           callId: callId,
@@ -69,7 +82,6 @@ exports.onCallCreated = onDocumentCreated(
           callerName: callerName,
           callType: callData.type,
         },
-        android: { priority: 'high' },
       });
     } catch (err) {
       logger.error('FCM call send failed', err);

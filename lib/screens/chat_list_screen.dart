@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
@@ -10,6 +11,7 @@ import '../providers/app_provider.dart';
 import '../services/chat_service.dart';
 import '../models/user_profile_model.dart';
 import '../constants/app_theme.dart';
+import '../utils/snack_util.dart';
 import 'chat_detail_screen.dart';
 
 class ChatListScreen extends StatefulWidget {
@@ -45,18 +47,15 @@ class _ChatListScreenState extends State<ChatListScreen> {
   Future<void> _loadProfile() async {
     try {
       final provider = context.read<AppProvider>();
-      final uid = provider.userId;
-      if (uid == null) return;
-
-      final profile = await _chatService.getUserProfile(uid);
+      // Profile is already loaded by AppProvider.initialize() — just read it
+      final profile = provider.profile;
       if (!mounted) return;
-
       setState(() {
         _currentUserName = profile?.name;
         _currentUserPhotoUrl = profile?.photoUrl;
         _checkingProfile = false;
       });
-      unawaited(_chatService.updateOnReturn(uid));
+      unawaited(_chatService.updateOnReturn(provider.chatUserId));
     } catch (_) {
     } finally {
       if (mounted && _checkingProfile) {
@@ -97,24 +96,24 @@ class _ChatListScreenState extends State<ChatListScreen> {
     );
     if (newWord != null && newWord.isNotEmpty) {
       await prefs.setString(_triggerKey, newWord);
+      if (mounted) context.showSuccess('Keyword updated to "$newWord"');
     }
   }
 
   Future<void> _pickProfilePhoto() async {
     final file = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 85);
     if (file == null || !mounted) return;
-    final uid = context.read<AppProvider>().userId!;
+    final uid = context.read<AppProvider>().chatUserId;
     setState(() => _uploadingPhoto = true);
     try {
       final url = await _chatService.uploadProfilePhoto(uid, File(file.path));
       await _chatService.updatePhotoUrl(uid, url);
-      if (mounted) setState(() => _currentUserPhotoUrl = url);
-    } catch (_) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to upload photo')),
-        );
+        setState(() => _currentUserPhotoUrl = url);
+        context.showSuccess('Profile photo updated');
       }
+    } catch (_) {
+      if (mounted) context.showError('Failed to upload photo');
     } finally {
       if (mounted) setState(() => _uploadingPhoto = false);
     }
@@ -122,7 +121,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final uid = context.read<AppProvider>().userId!;
+    final uid = context.read<AppProvider>().chatUserId;
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -253,7 +252,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
 // ── User Tile ─────────────────────────────────────────────────────────────────
 
-class _UserTile extends StatelessWidget {
+class _UserTile extends StatefulWidget {
   final UserProfileModel user;
   final String currentUid;
   final ChatService chatService;
@@ -265,103 +264,205 @@ class _UserTile extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    return StreamBuilder<Map<String, dynamic>?>(
-      stream: chatService.chatData(currentUid, user.uid),
-      builder: (ctx, snap) {
-        final data = snap.data;
-        final lastMsg = data?['lastMessage'] as String? ?? '';
-        final lastTime = data?['lastMessageTime'];
-        final unread = (data?['unread_$currentUid'] as int?) ?? 0;
+  State<_UserTile> createState() => _UserTileState();
+}
 
-        String timeStr = '';
-        if (lastTime != null) {
-          final dt = lastTime.toDate() as DateTime;
-          final now = DateTime.now();
-          timeStr = (dt.year == now.year && dt.month == now.month && dt.day == now.day)
-              ? DateFormat('HH:mm').format(dt)
-              : DateFormat('d MMM').format(dt);
-        }
+class _UserTileState extends State<_UserTile> {
+  // Streams are created once in initState so StreamBuilder never recreates
+  // them on parent rebuilds. Without this, every Firestore event causes the
+  // parent to rebuild, which passes new Stream instances to StreamBuilder,
+  // which briefly resets to null data — causing the tile to go blank.
+  late Stream<UserProfileModel?> _profileStream;
+  late Stream<Map<String, dynamic>?> _chatStream;
 
-        return Card(
-          margin: const EdgeInsets.only(bottom: 8),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          child: ListTile(
-            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-            leading: Stack(
-              children: [
-                CircleAvatar(
-                  radius: 24,
-                  backgroundColor: AppColors.primary,
-                  backgroundImage: user.photoUrl != null
-                      ? CachedNetworkImageProvider(user.photoUrl!)
-                      : null,
-                  child: user.photoUrl == null
-                      ? Text(
-                          user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
-                          style: const TextStyle(color: Colors.white,
-                              fontSize: 18, fontWeight: FontWeight.bold),
-                        )
-                      : null,
-                ),
-                if (unread > 0)
-                  Positioned(
-                    right: 0, top: 0,
-                    child: Container(
-                      width: 18, height: 18,
-                      decoration: const BoxDecoration(
-                          color: AppColors.holiday, shape: BoxShape.circle),
-                      child: Center(
-                        child: Text('$unread',
-                            style: const TextStyle(color: Colors.white,
-                                fontSize: 10, fontWeight: FontWeight.bold)),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-            title: Text(
-              user.name,
-              style: TextStyle(
-                  fontWeight: unread > 0 ? FontWeight.w800 : FontWeight.w600,
-                  color: AppColors.textPrimary),
-            ),
-            subtitle: lastMsg.isNotEmpty
-                ? Text(lastMsg,
-                    maxLines: 1, overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: unread > 0
-                            ? AppColors.textPrimary
-                            : AppColors.textSecondary,
-                        fontWeight: unread > 0 ? FontWeight.w600 : FontWeight.normal))
-                : const Text('Tap to start chatting',
-                    style: TextStyle(fontSize: 12, color: AppColors.textSecondary,
-                        fontStyle: FontStyle.italic)),
-            trailing: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                if (timeStr.isNotEmpty)
-                  Text(timeStr,
-                      style: TextStyle(
-                          fontSize: 11,
-                          color: unread > 0 ? AppColors.holiday : AppColors.textSecondary,
-                          fontWeight: unread > 0 ? FontWeight.w600 : FontWeight.normal)),
-                const SizedBox(height: 4),
-                const Icon(Icons.chevron_right_rounded, color: AppColors.textSecondary, size: 18),
-              ],
-            ),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => ChatDetailScreen(
-                  currentUid: currentUid,
-                  otherUser: user,
-                ),
+  @override
+  void initState() {
+    super.initState();
+    _profileStream = widget.chatService.watchUserProfile(widget.user.uid);
+    _chatStream = widget.chatService.chatData(widget.currentUid, widget.user.uid);
+  }
+
+  static void _openFullScreenPhoto(BuildContext context, String url) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => Scaffold(
+          backgroundColor: Colors.black,
+          appBar: AppBar(
+            backgroundColor: Colors.transparent,
+            iconTheme: const IconThemeData(color: Colors.white),
+          ),
+          body: Center(
+            child: InteractiveViewer(
+              child: CachedNetworkImage(
+                imageUrl: url,
+                placeholder: (_, __) =>
+                    const Center(child: CircularProgressIndicator()),
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<UserProfileModel?>(
+      stream: _profileStream,
+      initialData: widget.user,
+      builder: (ctx, profileSnap) {
+        final profile = profileSnap.data ?? widget.user;
+        final isOnline = DateTime.now().difference(profile.lastSeen).inMinutes < 2;
+
+        return StreamBuilder<Map<String, dynamic>?>(
+          stream: _chatStream,
+          builder: (ctx, snap) {
+            final data = snap.data;
+            final lastMsg = data?['lastMessage'] as String? ?? '';
+            final lastTime = data?['lastMessageTime'];
+            final lastSenderId = data?['lastSenderId'] as String? ?? '';
+            final unread = (data?['unread_${widget.currentUid}'] as int?) ?? 0;
+            final isMine = lastSenderId == widget.currentUid;
+
+            String timeStr = '';
+            if (lastTime != null) {
+              final dt = (lastTime as Timestamp).toDate();
+              final now = DateTime.now();
+              timeStr = (dt.year == now.year && dt.month == now.month && dt.day == now.day)
+                  ? DateFormat('HH:mm').format(dt)
+                  : DateFormat('d MMM').format(dt);
+            }
+
+            String? msgPreview = lastMsg.isEmpty
+                ? null
+                : isMine
+                    ? 'You: $lastMsg'
+                    : lastMsg;
+
+            return Card(
+              margin: const EdgeInsets.only(bottom: 8),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              child: ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                leading: GestureDetector(
+                  onTap: profile.photoUrl != null
+                      ? () => _openFullScreenPhoto(context, profile.photoUrl!)
+                      : null,
+                  child: Stack(
+                    children: [
+                      CircleAvatar(
+                        radius: 24,
+                        backgroundColor: AppColors.primary,
+                        backgroundImage: profile.photoUrl != null
+                            ? CachedNetworkImageProvider(profile.photoUrl!)
+                            : null,
+                        child: profile.photoUrl == null
+                            ? Text(
+                                profile.name.isNotEmpty ? profile.name[0].toUpperCase() : '?',
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold),
+                              )
+                            : null,
+                      ),
+                      if (isOnline)
+                        Positioned(
+                          right: 0,
+                          bottom: 0,
+                          child: Container(
+                            width: 14,
+                            height: 14,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF4CAF50),
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white, width: 2),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                title: Text(
+                  profile.name,
+                  style: TextStyle(
+                      fontWeight: unread > 0 ? FontWeight.w800 : FontWeight.w600,
+                      color: AppColors.textPrimary),
+                ),
+                subtitle: msgPreview != null
+                    ? Text(
+                        msgPreview,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: unread > 0
+                                ? AppColors.textPrimary
+                                : AppColors.textSecondary,
+                            fontWeight:
+                                unread > 0 ? FontWeight.w600 : FontWeight.normal),
+                      )
+                    : const Text('Tap to start chatting',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: AppColors.textSecondary,
+                            fontStyle: FontStyle.italic)),
+                trailing: SizedBox(
+                  width: 60,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      if (timeStr.isNotEmpty)
+                        Text(
+                          timeStr,
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: unread > 0
+                                  ? const Color(0xFF25D366)
+                                  : AppColors.textSecondary,
+                              fontWeight: unread > 0
+                                  ? FontWeight.w600
+                                  : FontWeight.normal),
+                        ),
+                      if (unread > 0) ...[
+                        if (timeStr.isNotEmpty) const SizedBox(height: 4),
+                        Container(
+                          padding: const EdgeInsets.all(2),
+                          decoration: const BoxDecoration(
+                            color: Color(0xFF25D366),
+                            shape: BoxShape.circle,
+                          ),
+                          constraints:
+                              const BoxConstraints(minWidth: 20, minHeight: 20),
+                          child: Center(
+                            child: Text(
+                              unread > 99 ? '99+' : '$unread',
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ChatDetailScreen(
+                      currentUid: widget.currentUid,
+                      otherUser: profile,
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
         );
       },
     );

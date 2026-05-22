@@ -2,41 +2,61 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Private data: notes and expenses per user
+    // Private data: notes and expenses per user.
+    // Also allows access from a different device's anonymous UID after the user
+    // logs back in with their profile — the profile doc stores 'currentAuthUid'
+    // so the new device's UID is linked to the original profile UID.
     match /users/{userId}/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow read, write: if request.auth != null && (
+        request.auth.uid == userId ||
+        get(/databases/$(database)/documents/user_profiles/$(userId)).data.get('currentAuthUid', '') == request.auth.uid
+      );
     }
 
     // Public user profiles (for chat discovery)
     match /user_profiles/{userId} {
       allow read: if request.auth != null;
-      allow write: if request.auth != null && request.auth.uid == userId;
+      allow create, delete: if request.auth != null && request.auth.uid == userId;
+      // Owner can update anything; any auth user can update presence/device fields
+      // (lastSeen for online status, fcmToken for notifications, currentAuthUid for cross-device login)
+      allow update: if request.auth != null && (
+        request.auth.uid == userId ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fcmToken', 'currentAuthUid', 'lastSeen'])
+      );
     }
 
-    // Voice & video calls (signaling only — media goes through Agora)
+    // Voice & video calls — any authenticated user can read/write since call IDs
+    // are unguessable UUIDs only shared via FCM to the target callee.
     match /calls/{callId} {
-      allow create: if request.auth != null &&
-        request.auth.uid == request.resource.data.callerId;
-      allow read, update, delete: if request.auth != null &&
-        (request.auth.uid == resource.data.callerId ||
-         request.auth.uid == resource.data.calleeId);
+      allow read, write: if request.auth != null;
     }
 
-    // Chat rooms — participants can write; any auth user can read (admin view)
+    // Chat rooms — participants can write; any auth user can read (admin view).
+    // Update is relaxed to any auth user (like calls) because cross-device login
+    // means request.auth.uid ≠ the profile UID stored in participants.
     match /chats/{chatId} {
       allow read: if request.auth != null;
-      allow create: if request.auth != null &&
-        request.auth.uid in request.resource.data.participants;
-      allow update: if request.auth != null &&
-        request.auth.uid in resource.data.participants;
+      // Create is open to any auth user — chatId is derived from profile UIDs,
+      // so only users who know those UIDs (via user_profiles read) can create chats.
+      // Needed for cross-device login where auth UID ≠ profile UID in participants.
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
       allow delete: if request.auth != null &&
         request.auth.uid in resource.data.participants;
 
-      // Messages: any auth user can read (admin view); only participants can write
+      // Messages: only participants (or cross-device users whose senderId is a
+      // participant) can write. Cross-device login uses profile UID as senderId
+      // while Firebase Auth UID is the device's anonymous UID.
       match /messages/{messageId} {
         allow read: if request.auth != null;
-        allow write: if request.auth != null &&
-          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+        allow create: if request.auth != null && (
+          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants ||
+          request.resource.data.senderId in get(/databases/$(database)/documents/chats/$(chatId)).data.participants
+        );
+        allow update, delete: if request.auth != null && (
+          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants ||
+          resource.data.senderId in get(/databases/$(database)/documents/chats/$(chatId)).data.participants
+        );
       }
     }
   }

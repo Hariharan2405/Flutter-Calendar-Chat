@@ -104,6 +104,17 @@ class CallService {
   }) async {
     await _requestPermissions(isVideo);
 
+    // Delete any stale call docs from this caller that were never cleaned up
+    try {
+      final stale = await _db.collection('calls')
+          .where('callerId', isEqualTo: callerId)
+          .where('status', whereIn: ['calling', 'ringing'])
+          .get();
+      for (final doc in stale.docs) {
+        doc.reference.delete().ignore();
+      }
+    } catch (_) {}
+
     final callId = _uuid.v4();
     activeCallId = callId;
     _callerName = callerName;
@@ -133,21 +144,24 @@ class CallService {
       try { await _engine!.setEnableSpeakerphone(false); } catch (_) {}
     }
 
-    // Minimal signaling doc — only exists until call ends
+    // status:'calling' = created, waiting for callee device to receive FCM.
+    // Callee's app updates it to 'ringing' when the notification is delivered.
     await _db.collection('calls').doc(callId).set({
       'callerId': callerId,
       'calleeId': calleeId,
       'callerName': callerName,
       'calleeName': calleeName,
       'type': _callTypeStr,
-      'status': 'ringing',
+      'status': 'calling',
       'createdAt': Timestamp.now(),
     });
 
     _callDocSub = _db.collection('calls').doc(callId).snapshots().listen((snap) {
       if (!snap.exists) return;
       final status = snap.data()?['status'] as String?;
-      if (status == 'ended' || status == 'declined') {
+      if (status == 'ringing') {
+        _onStatusChange?.call('ringing');
+      } else if (status == 'ended' || status == 'declined') {
         _onStatusChange?.call(status!);
       }
     });
@@ -298,8 +312,8 @@ class CallService {
     _callDocSub?.cancel();
     _callDocSub = null;
 
-    await _engine?.leaveChannel();
-    await _engine?.release();
+    try { await _engine?.leaveChannel(); } catch (_) {}
+    try { await _engine?.release(); } catch (_) {}
     _engine = null;
 
     activeCallId = null;

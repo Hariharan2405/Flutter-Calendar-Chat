@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../providers/app_provider.dart';
 import '../models/note_model.dart';
 import '../constants/app_theme.dart';
+import '../utils/snack_util.dart';
 
 class NotesSection extends StatelessWidget {
   const NotesSection({super.key});
@@ -53,7 +54,13 @@ class NotesSection extends StatelessWidget {
               itemBuilder: (ctx, i) => _NoteCard(
                 note: notes[i],
                 onEdit: () => _showNoteDialog(context, provider, note: notes[i]),
-                onDelete: () => provider.deleteNote(notes[i].id),
+                onDelete: () async {
+                  try {
+                    await provider.deleteNote(notes[i].id);
+                  } catch (_) {
+                    if (context.mounted) context.showError('Failed to delete note');
+                  }
+                },
               ),
             ),
           ),
@@ -67,16 +74,16 @@ class NotesSection extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.note_alt_outlined, size: 40, color: AppColors.textSecondary.withOpacity(0.5)),
+            Icon(Icons.note_alt_outlined, size: 40, color: AppColors.textSecondary.withValues(alpha: 0.5)),
             const SizedBox(height: 8),
             Text(
               'No notes for this day',
-              style: TextStyle(color: AppColors.textSecondary.withOpacity(0.7), fontSize: 13),
+              style: TextStyle(color: AppColors.textSecondary.withValues(alpha: 0.7), fontSize: 13),
             ),
             const SizedBox(height: 4),
             Text(
               'Tap + to add a note',
-              style: TextStyle(color: AppColors.textSecondary.withOpacity(0.5), fontSize: 12),
+              style: TextStyle(color: AppColors.textSecondary.withValues(alpha: 0.5), fontSize: 12),
             ),
           ],
         ),
@@ -153,14 +160,20 @@ class NotesSection extends StatelessWidget {
                         final title = titleCtrl.text.trim();
                         final content = contentCtrl.text.trim();
                         if (title.isEmpty && content.isEmpty) return;
-                        if (isEdit) {
-                          await provider.updateNote(
-                            note.copyWith(title: title, content: content),
-                          );
-                        } else {
-                          await provider.addNote(title, content);
+                        try {
+                          if (isEdit) {
+                            await provider.updateNote(
+                              note.copyWith(title: title, content: content),
+                            );
+                          } else {
+                            await provider.addNote(title, content);
+                          }
+                          if (ctx.mounted) Navigator.pop(ctx);
+                        } catch (_) {
+                          if (ctx.mounted) {
+                            ctx.showError(isEdit ? 'Failed to update note' : 'Failed to save note');
+                          }
                         }
-                        if (ctx.mounted) Navigator.pop(ctx);
                       },
                       child: Text(isEdit ? 'Update' : 'Save'),
                     ),

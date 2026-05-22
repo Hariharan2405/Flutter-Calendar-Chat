@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../providers/app_provider.dart';
 import '../services/chat_service.dart';
 import '../constants/app_theme.dart';
+import '../utils/snack_util.dart';
 import '../widgets/calendar_widget.dart';
 import '../widgets/notes_section.dart';
 import '../widgets/expense_section.dart';
@@ -19,11 +21,15 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   late TabController _tabCtrl;
   bool _profileDialogShown = false;
   final ChatService _chatService = ChatService();
+  String _appVersion = '';
 
   @override
   void initState() {
     super.initState();
     _tabCtrl = TabController(length: 2, vsync: this);
+    PackageInfo.fromPlatform().then((info) {
+      if (mounted) setState(() => _appVersion = 'v${info.version}');
+    });
   }
 
   void _maybeShowProfileSetup(AppProvider provider) {
@@ -146,13 +152,43 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                         setLocal(() => error = 'Incorrect password for this name.');
                         return;
                       }
-                      // Name + password match → login without creating a duplicate
-                      await provider.loginWithExistingProfile(existing);
+                      bool fcmOk = false;
+                      try {
+                        fcmOk = await provider.loginWithExistingProfile(existing);
+                      } catch (_) {
+                        fcmOk = false;
+                      }
                       if (ctx.mounted) Navigator.pop(ctx);
+                      if (mounted) {
+                        if (fcmOk) {
+                          context.showSuccess('Logged in as ${existing.name}. This device is now active.');
+                        } else {
+                          ScaffoldMessenger.of(context)
+                            ..hideCurrentSnackBar()
+                            ..showSnackBar(SnackBar(
+                              content: Row(children: [
+                                const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 18),
+                                const SizedBox(width: 10),
+                                Expanded(child: Text('Logged in as ${existing.name}. This device is now active.')),
+                              ]),
+                              backgroundColor: Colors.orange,
+                              behavior: SnackBarBehavior.floating,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                              duration: const Duration(seconds: 4),
+                            ));
+                        }
+                      }
                       return;
                     }
-                    await provider.createProfile(name, pass);
-                    if (ctx.mounted) Navigator.pop(ctx);
+                    try {
+                      await provider.createProfile(name, pass);
+                      if (ctx.mounted) {
+                        Navigator.pop(ctx);
+                        context.showSuccess('Profile created. Welcome, $name!');
+                      }
+                    } catch (_) {
+                      if (ctx.mounted) context.showError('Failed to create profile. Try again.');
+                    }
                   },
                   child: const Text('Save Profile', style: TextStyle(fontSize: 15)),
                 ),
@@ -374,6 +410,18 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                         ],
                       ),
                     ),
+
+                    if (_appVersion.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          _appVersion,
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: AppColors.textSecondary,
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               ),

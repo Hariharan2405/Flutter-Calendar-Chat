@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -11,21 +12,22 @@ import 'services/system_services.dart';
 
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
-// Must be top-level — runs in a separate isolate when app is killed/background
+// Must be top-level — runs in a separate isolate when app is killed/background.
+// The FCM notification field handles display (same as message notifications),
+// so we only need to mark the call as ringing here.
 @pragma('vm:entry-point')
 Future<void> _onBackgroundMessage(RemoteMessage message) async {
-  // Only handle incoming_call — it is a data-only message that Android won't
-  // auto-display. Chat messages carry a notification field that Android already
-  // shows automatically; handling them here would create a duplicate notification.
   if (message.data['type'] != 'incoming_call') return;
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  await NotificationService.init();
-  await NotificationService.showIncomingCallNotification(
-    callerName: message.data['callerName'] ?? 'Unknown',
-    callId: message.data['callId'] ?? '',
-    callerId: message.data['callerId'] ?? '',
-    isVideo: message.data['callType'] == 'video',
-  );
+  final callId = message.data['callId'];
+  if (callId != null && (callId as String).isNotEmpty) {
+    try {
+      await FirebaseFirestore.instance
+          .collection('calls')
+          .doc(callId)
+          .update({'status': 'ringing'});
+    } catch (_) {}
+  }
 }
 
 void main() async {
@@ -36,13 +38,17 @@ void main() async {
   // Register background/killed handler before runApp
   FirebaseMessaging.onBackgroundMessage(_onBackgroundMessage);
 
-  await NotificationService.init();
-  await NotificationService.requestPermission();
-
-  // Foreground notifications are handled by the Firestore listener in AppProvider.
-  // onMessage is intentionally not wired here to avoid duplicates.
+  // Init notification channels (fast, no dialog)
+  try {
+    await NotificationService.init();
+  } catch (_) {}
 
   runApp(const MyApp());
+
+  // Request permissions after first frame — avoids blocking startup in release
+  WidgetsBinding.instance.addPostFrameCallback((_) async {
+    await NotificationService.requestPermission();
+  });
 }
 
 class MyApp extends StatelessWidget {

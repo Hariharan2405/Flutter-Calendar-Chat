@@ -10,7 +10,7 @@ import '../services/call_service.dart';
 import '../services/notification_service.dart';
 import '../services/system_services.dart';
 
-enum _CallState { connecting, connected, ended, declined }
+enum _CallState { connecting, ringing, connected, ended, declined }
 
 class CallScreen extends StatefulWidget {
   final String callId;
@@ -44,6 +44,7 @@ class _CallScreenState extends State<CallScreen> {
   int? _remoteUid;
   bool _minimized = false;
   bool _isInPipMode = false;
+  bool _isHangingUp = false;
 
   int _durationSeconds = 0;
   Timer? _durationTimer;
@@ -114,7 +115,9 @@ class _CallScreenState extends State<CallScreen> {
 
   void _handleStatusChange(String status) {
     if (!mounted) return;
-    if (status == 'connected') {
+    if (status == 'ringing') {
+      setState(() => _callState = _CallState.ringing);
+    } else if (status == 'connected') {
       setState(() => _callState = _CallState.connected);
       _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
         if (mounted) setState(() => _durationSeconds++);
@@ -141,11 +144,16 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Future<void> _hangUp() async {
+    if (_isHangingUp) return;
+    _isHangingUp = true;
     _durationTimer?.cancel();
-    if (_isVideo) await SystemServices.setPipEnabled(false);
-    await NotificationService.cancelOngoingCallNotification();
-    if (mounted) setState(() => _remoteUid = null);
-    await _callService.endCall();
+    // Fire endCall without awaiting — Firestore write completes in background.
+    // This keeps the hang-up button instant even on slow networks.
+    _callService.endCall().ignore();
+    try {
+      if (_isVideo) await SystemServices.setPipEnabled(false);
+      await NotificationService.cancelOngoingCallNotification();
+    } catch (_) {}
     if (mounted) Navigator.pop(context);
   }
 
@@ -179,6 +187,8 @@ class _CallScreenState extends State<CallScreen> {
     switch (_callState) {
       case _CallState.connecting:
         return widget.isOutgoing ? 'Calling...' : 'Connecting...';
+      case _CallState.ringing:
+        return 'Ringing...';
       case _CallState.connected:
         return _formatDuration(_durationSeconds);
       case _CallState.ended:
