@@ -79,6 +79,17 @@ class ChatService {
             .toList());
   }
 
+  Stream<List<UserProfileModel>> getAllUsersStream() {
+    return _db
+        .collection('user_profiles')
+        .orderBy('name')
+        .snapshots()
+        .map((snap) => snap.docs
+            .where((d) => d.data()['name'] != null)
+            .map(UserProfileModel.fromFirestore)
+            .toList());
+  }
+
   // ── Chat Rooms ────────────────────────────────────────────────────────────
 
   static String chatId(String uid1, String uid2) {
@@ -177,6 +188,7 @@ class ChatService {
     required String text,
     String? replyToId,
     String? replyToText,
+    String? replyToImageUrl,
     String? replyToSenderId,
   }) async {
     await ensureChatExists(senderUid, receiverUid);
@@ -192,6 +204,7 @@ class ChatService {
       timestamp: now,
       replyToId: replyToId,
       replyToText: replyToText,
+      replyToImageUrl: replyToImageUrl,
       replyToSenderId: replyToSenderId,
     );
 
@@ -216,6 +229,7 @@ class ChatService {
     required File imageFile,
     String? replyToId,
     String? replyToText,
+    String? replyToImageUrl,
     String? replyToSenderId,
   }) async {
     await ensureChatExists(senderUid, receiverUid);
@@ -236,6 +250,7 @@ class ChatService {
       timestamp: now,
       replyToId: replyToId,
       replyToText: replyToText,
+      replyToImageUrl: replyToImageUrl,
       replyToSenderId: replyToSenderId,
     );
 
@@ -260,6 +275,7 @@ class ChatService {
     required String gifUrl,
     String? replyToId,
     String? replyToText,
+    String? replyToImageUrl,
     String? replyToSenderId,
   }) async {
     await ensureChatExists(senderUid, receiverUid);
@@ -275,6 +291,7 @@ class ChatService {
       timestamp: now,
       replyToId: replyToId,
       replyToText: replyToText,
+      replyToImageUrl: replyToImageUrl,
       replyToSenderId: replyToSenderId,
     );
 
@@ -299,6 +316,7 @@ class ChatService {
     required String sticker,
     String? replyToId,
     String? replyToText,
+    String? replyToImageUrl,
     String? replyToSenderId,
   }) async {
     await ensureChatExists(senderUid, receiverUid);
@@ -314,6 +332,7 @@ class ChatService {
       timestamp: now,
       replyToId: replyToId,
       replyToText: replyToText,
+      replyToImageUrl: replyToImageUrl,
       replyToSenderId: replyToSenderId,
     );
 

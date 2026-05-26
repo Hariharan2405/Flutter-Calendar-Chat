@@ -9,10 +9,14 @@ import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/app_provider.dart';
 import '../services/chat_service.dart';
+import '../services/status_service.dart';
 import '../models/user_profile_model.dart';
+import '../models/status_model.dart';
 import '../constants/app_theme.dart';
 import '../utils/snack_util.dart';
 import 'chat_detail_screen.dart';
+import 'status_screen.dart';
+import 'status_viewer_screen.dart';
 
 class ChatListScreen extends StatefulWidget {
   const ChatListScreen({super.key});
@@ -23,6 +27,7 @@ class ChatListScreen extends StatefulWidget {
 
 class _ChatListScreenState extends State<ChatListScreen> {
   final ChatService _chatService = ChatService();
+  final StatusService _statusService = StatusService();
   bool _checkingProfile = true;
   String? _currentUserName;
   String? _currentUserPhotoUrl;
@@ -128,6 +133,14 @@ class _ChatListScreenState extends State<ChatListScreen> {
       appBar: AppBar(
         title: const Text('Messages'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.circle_outlined, color: Colors.white),
+            tooltip: 'Status',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const StatusScreen()),
+            ),
+          ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert, color: Colors.white),
             onSelected: (v) {
@@ -201,22 +214,40 @@ class _ChatListScreenState extends State<ChatListScreen> {
       ),
       body: _checkingProfile
           ? const Center(child: CircularProgressIndicator())
-          : StreamBuilder<List<UserProfileModel>>(
-              stream: _chatService.getAllUsersExcept(uid),
-              builder: (ctx, snap) {
-                if (snap.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                final users = snap.data ?? [];
-                if (users.isEmpty) return _buildEmpty();
-                return ListView.builder(
-                  padding: const EdgeInsets.all(12),
-                  itemCount: users.length,
-                  itemBuilder: (ctx, i) => _UserTile(
-                    user: users[i],
-                    currentUid: uid,
-                    chatService: _chatService,
-                  ),
+          : StreamBuilder<List<StatusModel>>(
+              stream: _statusService.allActiveStatuses(),
+              builder: (ctx, statusSnap) {
+                final allStatuses = statusSnap.data ?? [];
+                return StreamBuilder<List<UserProfileModel>>(
+                  stream: _chatService.getAllUsersExcept(uid),
+                  builder: (ctx, snap) {
+                    if (snap.connectionState == ConnectionState.waiting) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+                    final users = snap.data ?? [];
+                    if (users.isEmpty) return _buildEmpty();
+
+                    // Build status groups so we can look up rings per user
+                    final statusGroups = StatusService.groupByUser(
+                      statuses: allStatuses,
+                      users: users,
+                      currentUid: uid,
+                    );
+                    final groupMap = {
+                      for (final g in statusGroups) g.uid: g
+                    };
+
+                    return ListView.builder(
+                      padding: const EdgeInsets.all(12),
+                      itemCount: users.length,
+                      itemBuilder: (ctx, i) => _UserTile(
+                        user: users[i],
+                        currentUid: uid,
+                        chatService: _chatService,
+                        statusGroup: groupMap[users[i].uid],
+                      ),
+                    );
+                  },
                 );
               },
             ),
@@ -256,11 +287,13 @@ class _UserTile extends StatefulWidget {
   final UserProfileModel user;
   final String currentUid;
   final ChatService chatService;
+  final UserStatuses? statusGroup;
 
   const _UserTile({
     required this.user,
     required this.currentUid,
     required this.chatService,
+    this.statusGroup,
   });
 
   @override
@@ -306,6 +339,21 @@ class _UserTileState extends State<_UserTile> {
     );
   }
 
+  void _openStatus(BuildContext context) {
+    final group = widget.statusGroup;
+    if (group == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => StatusViewerScreen(
+          groups: [group],
+          initialGroupIndex: 0,
+          currentUid: widget.currentUid,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<UserProfileModel?>(
@@ -346,42 +394,48 @@ class _UserTileState extends State<_UserTile> {
               child: ListTile(
                 contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
                 leading: GestureDetector(
-                  onTap: profile.photoUrl != null
-                      ? () => _openFullScreenPhoto(context, profile.photoUrl!)
-                      : null,
-                  child: Stack(
-                    children: [
-                      CircleAvatar(
-                        radius: 24,
-                        backgroundColor: AppColors.primary,
-                        backgroundImage: profile.photoUrl != null
-                            ? CachedNetworkImageProvider(profile.photoUrl!)
-                            : null,
-                        child: profile.photoUrl == null
-                            ? Text(
-                                profile.name.isNotEmpty ? profile.name[0].toUpperCase() : '?',
-                                style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.bold),
-                              )
-                            : null,
-                      ),
-                      if (isOnline)
-                        Positioned(
-                          right: 0,
-                          bottom: 0,
-                          child: Container(
-                            width: 14,
-                            height: 14,
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF4CAF50),
-                              shape: BoxShape.circle,
-                              border: Border.all(color: Colors.white, width: 2),
+                  onTap: widget.statusGroup != null
+                      ? () => _openStatus(context)
+                      : profile.photoUrl != null
+                          ? () => _openFullScreenPhoto(context, profile.photoUrl!)
+                          : null,
+                  child: _StatusRingWrapper(
+                    hasStatus: widget.statusGroup != null,
+                    allViewed: widget.statusGroup?.allViewedBy(widget.currentUid) ?? false,
+                    child: Stack(
+                      children: [
+                        CircleAvatar(
+                          radius: 24,
+                          backgroundColor: AppColors.primary,
+                          backgroundImage: profile.photoUrl != null
+                              ? CachedNetworkImageProvider(profile.photoUrl!)
+                              : null,
+                          child: profile.photoUrl == null
+                              ? Text(
+                                  profile.name.isNotEmpty ? profile.name[0].toUpperCase() : '?',
+                                  style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold),
+                                )
+                              : null,
+                        ),
+                        if (isOnline)
+                          Positioned(
+                            right: 0,
+                            bottom: 0,
+                            child: Container(
+                              width: 14,
+                              height: 14,
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF4CAF50),
+                                shape: BoxShape.circle,
+                                border: Border.all(color: Colors.white, width: 2),
+                              ),
                             ),
                           ),
-                        ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
                 title: Text(
@@ -465,6 +519,47 @@ class _UserTileState extends State<_UserTile> {
           },
         );
       },
+    );
+  }
+}
+
+// ── Status ring wrapper ────────────────────────────────────────────────────────
+
+class _StatusRingWrapper extends StatelessWidget {
+  final bool hasStatus;
+  final bool allViewed;
+  final Widget child;
+
+  const _StatusRingWrapper({
+    required this.hasStatus,
+    required this.allViewed,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (!hasStatus) return child;
+    return Container(
+      padding: const EdgeInsets.all(2.5),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: allViewed
+            ? null
+            : const LinearGradient(
+                colors: [Color(0xFF833AB4), Color(0xFFFD1D1D), Color(0xFFF77737)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+        color: allViewed ? Colors.grey.shade400 : null,
+      ),
+      child: Container(
+        padding: const EdgeInsets.all(2),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          shape: BoxShape.circle,
+        ),
+        child: child,
+      ),
     );
   }
 }

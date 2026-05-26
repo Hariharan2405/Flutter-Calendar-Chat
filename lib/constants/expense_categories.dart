@@ -71,6 +71,18 @@ class ExpenseCategories {
       color: Color(0xFF546E7A),
     ),
     const ExpenseCategory(
+      id: 'snacks',
+      name: 'Snacks & Cool Drinks',
+      icon: Icons.local_cafe,
+      color: Color(0xFFF4511E),
+    ),
+    const ExpenseCategory(
+      id: 'online_food',
+      name: 'Online Food',
+      icon: Icons.delivery_dining,
+      color: Color(0xFF039BE5),
+    ),
+    const ExpenseCategory(
       id: 'others',
       name: 'Others',
       icon: Icons.more_horiz,

@@ -11,6 +11,7 @@ class MessageModel {
   final String? imageUrl;
   final String? replyToId;
   final String? replyToText;
+  final String? replyToImageUrl;
   final String? replyToSenderId;
   final MessageType type;
   final DateTime timestamp;
@@ -25,6 +26,7 @@ class MessageModel {
     this.imageUrl,
     this.replyToId,
     this.replyToText,
+    this.replyToImageUrl,
     this.replyToSenderId,
     required this.type,
     required this.timestamp,
@@ -59,6 +61,7 @@ class MessageModel {
       imageUrl: data['imageUrl'],
       replyToId: data['replyToId'],
       replyToText: data['replyToText'],
+      replyToImageUrl: data['replyToImageUrl'],
       replyToSenderId: data['replyToSenderId'],
       type: type,
       timestamp: (data['timestamp'] as Timestamp).toDate(),
@@ -92,6 +95,7 @@ class MessageModel {
       if (imageUrl != null) 'imageUrl': imageUrl,
       if (replyToId != null) 'replyToId': replyToId,
       if (replyToText != null) 'replyToText': replyToText,
+      if (replyToImageUrl != null) 'replyToImageUrl': replyToImageUrl,
       if (replyToSenderId != null) 'replyToSenderId': replyToSenderId,
       'type': typeStr,
       'timestamp': Timestamp.fromDate(timestamp),

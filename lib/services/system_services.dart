@@ -6,11 +6,16 @@ class SystemServices {
   // Set by CallScreen to know when the OS enters/exits PiP mode
   static void Function(bool isInPip)? onPipModeChanged;
 
+  // Set by AppProvider to navigate back to an active call
+  static void Function()? onReturnToCall;
+
   // Call once at app start so the channel can receive native → Flutter messages
   static void initialize() {
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'onPipModeChanged') {
         onPipModeChanged?.call(call.arguments as bool);
+      } else if (call.method == 'returnToCall') {
+        onReturnToCall?.call();
       }
     });
   }
@@ -36,6 +41,18 @@ class SystemServices {
   static Future<void> enterPip() async {
     try {
       await _channel.invokeMethod('enterPip');
+    } catch (_) {}
+  }
+
+  static Future<void> startCallService(String otherUserName) async {
+    try {
+      await _channel.invokeMethod('startCallService', otherUserName);
+    } catch (_) {}
+  }
+
+  static Future<void> stopCallService() async {
+    try {
+      await _channel.invokeMethod('stopCallService');
     } catch (_) {}
   }
 }

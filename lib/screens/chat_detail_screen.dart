@@ -20,10 +20,40 @@ import '../models/call_model.dart';
 import '../constants/app_theme.dart';
 import '../utils/snack_util.dart';
 import '../widgets/voice_preview_sheet.dart';
-import '../widgets/image_preview_sheet.dart';
 import '../widgets/gif_picker_sheet.dart';
 import '../widgets/sticker_picker_sheet.dart';
 import 'call_screen.dart';
+import 'image_edit_screen.dart';
+
+// ── Pending message types ─────────────────────────────────────────────────────
+
+enum _PendingStatus { sending, failed }
+
+class _PendingItem {
+  final String id;
+  final MessageType type;
+  final File? localFile;
+  final String? gifUrl;
+  final String? sticker;
+  final String? replyToText;
+  final String? replyToId;
+  final String? replyToImageUrl;
+  final String? replyToSenderId;
+  _PendingStatus status = _PendingStatus.sending;
+  bool isCancelled = false;
+
+  _PendingItem({
+    required this.id,
+    required this.type,
+    this.localFile,
+    this.gifUrl,
+    this.sticker,
+    this.replyToText,
+    this.replyToId,
+    this.replyToImageUrl,
+    this.replyToSenderId,
+  });
+}
 
 // Tracks active chat for notification suppression
 class ActiveChatTracker {
@@ -55,10 +85,16 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
   late final Stream<List<MessageModel>> _messagesStream;
 
+  final List<_PendingItem> _pendingItems = [];
+
   bool _isRecording = false;
   bool _isSending = false;
   bool _showEmojiPicker = false;
-  String? _playingMessageId;
+  final ValueNotifier<String?> _playingNotifier = ValueNotifier(null);
+  int? _prevMsgCount;
+  List<MessageModel> _currentMessages = [];
+  final Map<String, GlobalKey> _messageKeys = {};
+  String? _highlightedMessageId;
   String? _recordingPath;
   int _recordingSeconds = 0;
   Timer? _recordingTimer;
@@ -103,7 +139,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     });
 
     _player.onPlayerComplete.listen((_) {
-      if (mounted) setState(() => _playingMessageId = null);
+      if (mounted) _playingNotifier.value = null;
     });
     _textFocus.addListener(() {
       if (_textFocus.hasFocus && _showEmojiPicker) {
@@ -435,26 +471,60 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           );
         }
 
+        // When new messages arrive and the user has scrolled up, preserve their
+        // position. New messages insert at index 0 (bottom of reverse list),
+        // which shifts existing content — we compensate by adding the delta.
+        if (_prevMsgCount != null &&
+            messages.length > _prevMsgCount! &&
+            _scrollCtrl.hasClients &&
+            _scrollCtrl.position.pixels > 50) {
+          final pixelsBefore = _scrollCtrl.position.pixels;
+          final maxBefore = _scrollCtrl.position.maxScrollExtent;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted || !_scrollCtrl.hasClients) return;
+            final delta = _scrollCtrl.position.maxScrollExtent - maxBefore;
+            if (delta > 0) _scrollCtrl.jumpTo(pixelsBefore + delta);
+          });
+        }
+        _prevMsgCount = messages.length;
+        _currentMessages = messages;
+
+        final pendingCount = _pendingItems.length;
+        final totalCount = messages.length + pendingCount;
         return ListView.builder(
           controller: _scrollCtrl,
           reverse: true,
           padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-          itemCount: messages.length,
+          itemCount: totalCount,
           itemBuilder: (ctx, i) {
-            final msg = messages[i];
+            // Pending items occupy the bottom slots (index 0 = newest in reverse list)
+            if (i < pendingCount) {
+              final pItem = _pendingItems[pendingCount - 1 - i];
+              return _buildPendingBubble(pItem);
+            }
+            final msgI = i - pendingCount;
+            final msg = messages[msgI];
             final isMe = msg.senderId == widget.currentUid;
-            // In reversed list: messages[i+1] is chronologically older.
+            // In reversed list: messages[msgI+1] is chronologically older.
             // Show date header above the oldest message of each day.
-            final showDate = i == messages.length - 1 ||
-                !_isSameDay(messages[i].timestamp, messages[i + 1].timestamp);
-            return Column(
-              children: [
-                _SwipeToReply(
-                  onReply: () => setState(() => _replyingTo = msg),
-                  child: _buildBubble(msg, isMe),
-                ),
-                if (showDate) _buildDateDivider(msg.timestamp),
-              ],
+            final showDate = msgI == messages.length - 1 ||
+                !_isSameDay(messages[msgI].timestamp, messages[msgI + 1].timestamp);
+            final key = _messageKeys.putIfAbsent(msg.id, () => GlobalKey());
+            return AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              color: _highlightedMessageId == msg.id
+                  ? AppColors.primary.withValues(alpha: 0.15)
+                  : Colors.transparent,
+              child: Column(
+                key: key,
+                children: [
+                  _SwipeToReply(
+                    onReply: () => setState(() => _replyingTo = msg),
+                    child: _buildBubble(msg, isMe),
+                  ),
+                  if (showDate) _buildDateDivider(msg.timestamp),
+                ],
+              ),
             );
           },
         );
@@ -557,7 +627,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             children: [
               Text(msg.text ?? '', style: const TextStyle(fontSize: 56)),
               Text(
-                DateFormat('HH:mm').format(msg.timestamp),
+                DateFormat('h:mm a').format(msg.timestamp),
                 style: const TextStyle(
                     fontSize: 10, color: AppColors.textSecondary),
               ),
@@ -576,7 +646,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (msg.replyToText != null) ...[
-            _buildReplySnippet(msg.replyToText!, isMe),
+            _buildReplySnippet(
+              text: msg.replyToText!,
+              isMe: isMe,
+              imageUrl: msg.replyToImageUrl,
+              replyToId: msg.replyToId,
+            ),
             const SizedBox(height: 6),
           ],
           if (msg.type == MessageType.text)
@@ -599,7 +674,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                             : AppColors.textSecondary,
                         fontStyle: FontStyle.italic)),
               Text(
-                DateFormat('HH:mm').format(msg.timestamp),
+                DateFormat('h:mm a').format(msg.timestamp),
                 style: TextStyle(
                     fontSize: 10,
                     color: isMe
@@ -627,7 +702,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             if (msg.replyToText != null)
               Padding(
                 padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
-                child: _buildReplySnippet(msg.replyToText!, isMe),
+                child: _buildReplySnippet(
+                  text: msg.replyToText!,
+                  isMe: isMe,
+                  imageUrl: msg.replyToImageUrl,
+                  replyToId: msg.replyToId,
+                ),
               ),
             GestureDetector(
               onTap: () => _viewFullImage(msg.imageUrl!),
@@ -667,7 +747,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  DateFormat('HH:mm').format(msg.timestamp),
+                  DateFormat('h:mm a').format(msg.timestamp),
                   style: const TextStyle(fontSize: 10, color: Colors.white),
                 ),
                 if (isMe) ...[
@@ -682,89 +762,133 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     );
   }
 
-  Widget _buildReplySnippet(String text, bool isMe) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(8, 5, 8, 5),
-      decoration: BoxDecoration(
-        color: isMe
-            ? Colors.white.withValues(alpha: 0.15)
-            : AppColors.background,
-        borderRadius: BorderRadius.circular(8),
-        border: Border(
-          left: BorderSide(
-            color: isMe ? Colors.white70 : AppColors.primary,
-            width: 3,
+  Widget _buildReplySnippet({
+    required String text,
+    required bool isMe,
+    String? imageUrl,
+    String? replyToId,
+  }) {
+    return GestureDetector(
+      onTap: replyToId != null ? () => _scrollToMessage(replyToId) : null,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(8, 5, 8, 5),
+        decoration: BoxDecoration(
+          color: isMe
+              ? Colors.white.withValues(alpha: 0.15)
+              : AppColors.background,
+          borderRadius: BorderRadius.circular(8),
+          border: Border(
+            left: BorderSide(
+              color: isMe ? Colors.white70 : AppColors.primary,
+              width: 3,
+            ),
           ),
         ),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontSize: 12,
-          color: isMe ? Colors.white70 : AppColors.textSecondary,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Text(
+                text,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: isMe ? Colors.white70 : AppColors.textSecondary,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (imageUrl != null) ...[
+              const SizedBox(width: 8),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: CachedNetworkImage(
+                  imageUrl: imageUrl,
+                  width: 40,
+                  height: 40,
+                  fit: BoxFit.cover,
+                  placeholder: (_, __) => Container(
+                    width: 40,
+                    height: 40,
+                    color: isMe
+                        ? Colors.white.withValues(alpha: 0.1)
+                        : AppColors.divider,
+                  ),
+                  errorWidget: (_, __, ___) => const SizedBox(
+                    width: 40,
+                    height: 40,
+                    child: Icon(Icons.broken_image_outlined, size: 18),
+                  ),
+                ),
+              ),
+            ],
+          ],
         ),
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
       ),
     );
   }
 
   Widget _buildVoiceBubble(MessageModel msg, bool isMe) {
-    final isPlaying = _playingMessageId == msg.id;
     final dur = msg.audioDurationSeconds ?? 0;
 
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        GestureDetector(
-          onTap: () => _togglePlay(msg),
-          child: Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: isMe
-                  ? Colors.white.withValues(alpha: 0.2)
-                  : AppColors.primary.withValues(alpha: 0.1),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-              color: isMe ? Colors.white : AppColors.primary,
-              size: 20,
-            ),
-          ),
-        ),
-        const SizedBox(width: 8),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return ValueListenableBuilder<String?>(
+      valueListenable: _playingNotifier,
+      builder: (context, playingId, _) {
+        final isPlaying = playingId == msg.id;
+        return Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
-              children: List.generate(
-                  20,
-                  (i) => Container(
-                        width: 3,
-                        height: (4 + (i % 4) * 4).toDouble(),
-                        margin: const EdgeInsets.symmetric(horizontal: 1),
-                        decoration: BoxDecoration(
-                          color: isMe
-                              ? Colors.white
-                                  .withValues(alpha: isPlaying ? 1.0 : 0.55)
-                              : AppColors.primary
-                                  .withValues(alpha: isPlaying ? 1.0 : 0.4),
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      )),
+            GestureDetector(
+              onTap: () => _togglePlay(msg),
+              child: Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: isMe
+                      ? Colors.white.withValues(alpha: 0.2)
+                      : AppColors.primary.withValues(alpha: 0.1),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                  color: isMe ? Colors.white : AppColors.primary,
+                  size: 20,
+                ),
+              ),
             ),
-            const SizedBox(height: 2),
-            Text(_fmt(dur),
-                style: TextStyle(
-                    fontSize: 10,
-                    color: isMe
-                        ? Colors.white.withValues(alpha: 0.8)
-                        : AppColors.textSecondary)),
+            const SizedBox(width: 8),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: List.generate(
+                      20,
+                      (i) => Container(
+                            width: 3,
+                            height: (4 + (i % 4) * 4).toDouble(),
+                            margin: const EdgeInsets.symmetric(horizontal: 1),
+                            decoration: BoxDecoration(
+                              color: isMe
+                                  ? Colors.white
+                                      .withValues(alpha: isPlaying ? 1.0 : 0.55)
+                                  : AppColors.primary
+                                      .withValues(alpha: isPlaying ? 1.0 : 0.4),
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          )),
+                ),
+                const SizedBox(height: 2),
+                Text(_fmt(dur),
+                    style: TextStyle(
+                        fontSize: 10,
+                        color: isMe
+                            ? Colors.white.withValues(alpha: 0.8)
+                            : AppColors.textSecondary)),
+              ],
+            ),
           ],
-        ),
-      ],
+        );
+      },
     );
   }
 
@@ -1137,25 +1261,24 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
   Future<void> _onKeyboardContentInserted(KeyboardInsertedContent content) async {
     final bytes = content.data;
-    if (bytes == null || !mounted || _isSending) return;
-    setState(() => _isSending = true);
-    try {
-      final dir = await getTemporaryDirectory();
-      final ext = content.mimeType.split('/').last.split('+').first;
-      final file = File(
-          '${dir.path}/keyboard_${DateTime.now().millisecondsSinceEpoch}.$ext');
-      await file.writeAsBytes(bytes);
-      if (!mounted) return;
-      await _chatService.sendImageMessage(
-        senderUid: widget.currentUid,
-        receiverUid: widget.otherUser.uid,
-        imageFile: file,
-      );
-    } catch (_) {
-      if (mounted) context.showError('Failed to send media');
-    } finally {
-      if (mounted) setState(() => _isSending = false);
-    }
+    if (bytes == null || !mounted) return;
+    final dir = await getTemporaryDirectory();
+    final ext = content.mimeType.split('/').last.split('+').first;
+    final file = File(
+        '${dir.path}/keyboard_${DateTime.now().millisecondsSinceEpoch}.$ext');
+    await file.writeAsBytes(bytes);
+    if (!mounted) return;
+    final item = _PendingItem(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      type: MessageType.image,
+      localFile: file,
+      replyToText: _replyToPreviewText(),
+      replyToId: _replyingTo?.id,
+      replyToImageUrl: _replyToImageUrl(),
+      replyToSenderId: _replyingTo?.senderId,
+    );
+    if (mounted) setState(() => _replyingTo = null);
+    await _enqueuePending(item);
   }
 
   Future<void> _pickImage(ImageSource source) async {
@@ -1163,31 +1286,25 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         await _imagePicker.pickImage(source: source, imageQuality: 85);
     if (file == null || !mounted) return;
 
-    final imageFile = File(file.path);
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => ImagePreviewSheet(
-        imageFile: imageFile,
-        onSend: () async {
-          try {
-            await _chatService.sendImageMessage(
-              senderUid: widget.currentUid,
-              receiverUid: widget.otherUser.uid,
-              imageFile: imageFile,
-              replyToId: _replyingTo?.id,
-              replyToText: _replyToPreviewText(),
-              replyToSenderId: _replyingTo?.senderId,
-            );
-          } catch (_) {
-            if (mounted) context.showError('Failed to send image');
-          }
-        },
-      ),
-    ).then((_) {
-      if (_replyingTo != null) setState(() => _replyingTo = null);
-    });
+    // Open editor — user can draw / crop before sending
+    final File? edited = await Navigator.push<File>(
+      context,
+      MaterialPageRoute(
+          builder: (_) => ImageEditScreen(imageFile: File(file.path))),
+    );
+    if (edited == null || !mounted) return;
+
+    final item = _PendingItem(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      type: MessageType.image,
+      localFile: edited,
+      replyToText: _replyToPreviewText(),
+      replyToId: _replyingTo?.id,
+      replyToImageUrl: _replyToImageUrl(),
+      replyToSenderId: _replyingTo?.senderId,
+    );
+    if (mounted) setState(() => _replyingTo = null);
+    await _enqueuePending(item);
   }
 
   Future<void> _showGifPicker() async {
@@ -1199,22 +1316,17 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     );
     if (gifUrl == null || !mounted) return;
 
-    setState(() => _isSending = true);
-    try {
-      await _chatService.sendGifMessage(
-        senderUid: widget.currentUid,
-        receiverUid: widget.otherUser.uid,
-        gifUrl: gifUrl,
-        replyToId: _replyingTo?.id,
-        replyToText: _replyToPreviewText(),
-        replyToSenderId: _replyingTo?.senderId,
-      );
-      if (mounted) setState(() => _replyingTo = null);
-    } catch (_) {
-      if (mounted) context.showError('Failed to send GIF');
-    } finally {
-      if (mounted) setState(() => _isSending = false);
-    }
+    final item = _PendingItem(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      type: MessageType.gif,
+      gifUrl: gifUrl,
+      replyToText: _replyToPreviewText(),
+      replyToId: _replyingTo?.id,
+      replyToImageUrl: _replyToImageUrl(),
+      replyToSenderId: _replyingTo?.senderId,
+    );
+    if (mounted) setState(() => _replyingTo = null);
+    await _enqueuePending(item);
   }
 
   Future<void> _showStickerPicker() async {
@@ -1226,22 +1338,234 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     );
     if (sticker == null || !mounted) return;
 
-    setState(() => _isSending = true);
-    try {
-      await _chatService.sendStickerMessage(
-        senderUid: widget.currentUid,
-        receiverUid: widget.otherUser.uid,
-        sticker: sticker,
-        replyToId: _replyingTo?.id,
-        replyToText: _replyToPreviewText(),
-        replyToSenderId: _replyingTo?.senderId,
+    final item = _PendingItem(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      type: MessageType.sticker,
+      sticker: sticker,
+      replyToText: _replyToPreviewText(),
+      replyToId: _replyingTo?.id,
+      replyToImageUrl: _replyToImageUrl(),
+      replyToSenderId: _replyingTo?.senderId,
+    );
+    if (mounted) setState(() => _replyingTo = null);
+    await _enqueuePending(item);
+  }
+
+  // ── Pending (optimistic) bubbles ──────────────────────────────────────────
+
+  Widget _buildPendingBubble(_PendingItem item) {
+    if (item.type == MessageType.sticker) {
+      return Align(
+        alignment: Alignment.centerRight,
+        child: Padding(
+          padding: const EdgeInsets.only(top: 3, bottom: 3, left: 60),
+          child: Stack(
+            children: [
+              Text(item.sticker!, style: const TextStyle(fontSize: 56)),
+              if (item.status == _PendingStatus.sending)
+                Positioned(
+                  bottom: 0,
+                  right: 0,
+                  child: Container(
+                    width: 20,
+                    height: 20,
+                    decoration: const BoxDecoration(
+                        color: Colors.black54, shape: BoxShape.circle),
+                    child: const Padding(
+                      padding: EdgeInsets.all(3),
+                      child: CircularProgressIndicator(
+                          color: Colors.white, strokeWidth: 2),
+                    ),
+                  ),
+                ),
+              if (item.status == _PendingStatus.failed)
+                Positioned(
+                  bottom: 0,
+                  right: 0,
+                  child: GestureDetector(
+                    onTap: () => _retryPending(item.id),
+                    child: Container(
+                      width: 24,
+                      height: 24,
+                      decoration: BoxDecoration(
+                          color: Colors.red.shade600,
+                          shape: BoxShape.circle),
+                      child: const Icon(Icons.refresh_rounded,
+                          color: Colors.white, size: 14),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
       );
-      if (mounted) setState(() => _replyingTo = null);
-    } catch (_) {
-      if (mounted) context.showError('Failed to send sticker');
-    } finally {
-      if (mounted) setState(() => _isSending = false);
     }
+
+    // Image / GIF pending bubble
+    Widget content;
+    if (item.localFile != null) {
+      content = Image.file(item.localFile!,
+          fit: BoxFit.cover, width: double.infinity);
+    } else if (item.gifUrl != null) {
+      content = CachedNetworkImage(
+        imageUrl: item.gifUrl!,
+        fit: BoxFit.cover,
+        width: double.infinity,
+        placeholder: (_, __) =>
+            Container(height: 160, color: AppColors.background),
+        errorWidget: (_, __, ___) =>
+            Container(height: 160, color: AppColors.background,
+                child: const Icon(Icons.broken_image_outlined,
+                    color: AppColors.textSecondary)),
+      );
+    } else {
+      content = Container(height: 160, color: AppColors.background);
+    }
+
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Container(
+        margin: const EdgeInsets.only(top: 3, bottom: 3, left: 60),
+        constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.72),
+        decoration: BoxDecoration(
+          color: AppColors.primary,
+          borderRadius: BorderRadius.circular(18),
+          boxShadow: [
+            BoxShadow(
+                color: AppColors.cardShadow,
+                blurRadius: 4,
+                offset: const Offset(0, 2))
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(18),
+          child: Stack(
+            children: [
+              content,
+              // Loading overlay
+              if (item.status == _PendingStatus.sending)
+                Positioned.fill(
+                  child: Container(
+                    color: Colors.black38,
+                    child: const Center(
+                      child: CircularProgressIndicator(
+                          color: Colors.white, strokeWidth: 2.5),
+                    ),
+                  ),
+                ),
+              // Error overlay with retry
+              if (item.status == _PendingStatus.failed)
+                Positioned.fill(
+                  child: Container(
+                    color: Colors.black54,
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.error_outline_rounded,
+                            color: Colors.white, size: 28),
+                        const SizedBox(height: 4),
+                        GestureDetector(
+                          onTap: () => _retryPending(item.id),
+                          child: const Text('Tap to retry',
+                              style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  decoration: TextDecoration.underline,
+                                  decorationColor: Colors.white)),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              // Cancel button
+              Positioned(
+                top: 6,
+                right: 6,
+                child: GestureDetector(
+                  onTap: () => _cancelPending(item.id),
+                  child: Container(
+                    width: 24,
+                    height: 24,
+                    decoration: const BoxDecoration(
+                        color: Colors.black54, shape: BoxShape.circle),
+                    child: const Icon(Icons.close_rounded,
+                        color: Colors.white, size: 14),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _enqueuePending(_PendingItem item) async {
+    if (mounted) setState(() => _pendingItems.add(item));
+    _scrollToBottom();
+    await _executePend(item);
+  }
+
+  Future<void> _executePend(_PendingItem item) async {
+    try {
+      switch (item.type) {
+        case MessageType.image:
+          await _chatService.sendImageMessage(
+            senderUid: widget.currentUid,
+            receiverUid: widget.otherUser.uid,
+            imageFile: item.localFile!,
+            replyToId: item.replyToId,
+            replyToText: item.replyToText,
+            replyToImageUrl: item.replyToImageUrl,
+            replyToSenderId: item.replyToSenderId,
+          );
+        case MessageType.gif:
+          await _chatService.sendGifMessage(
+            senderUid: widget.currentUid,
+            receiverUid: widget.otherUser.uid,
+            gifUrl: item.gifUrl!,
+            replyToId: item.replyToId,
+            replyToText: item.replyToText,
+            replyToImageUrl: item.replyToImageUrl,
+            replyToSenderId: item.replyToSenderId,
+          );
+        case MessageType.sticker:
+          await _chatService.sendStickerMessage(
+            senderUid: widget.currentUid,
+            receiverUid: widget.otherUser.uid,
+            sticker: item.sticker!,
+            replyToId: item.replyToId,
+            replyToText: item.replyToText,
+            replyToImageUrl: item.replyToImageUrl,
+            replyToSenderId: item.replyToSenderId,
+          );
+        default:
+          break;
+      }
+      if (mounted && !item.isCancelled) {
+        setState(() => _pendingItems.removeWhere((p) => p.id == item.id));
+      }
+    } catch (_) {
+      if (mounted && !item.isCancelled) {
+        setState(() => item.status = _PendingStatus.failed);
+      }
+    }
+  }
+
+  Future<void> _retryPending(String id) async {
+    final idx = _pendingItems.indexWhere((p) => p.id == id);
+    if (idx == -1) return;
+    final item = _pendingItems[idx];
+    setState(() => item.status = _PendingStatus.sending);
+    await _executePend(item);
+  }
+
+  void _cancelPending(String id) {
+    final idx = _pendingItems.indexWhere((p) => p.id == id);
+    if (idx == -1) return;
+    _pendingItems[idx].isCancelled = true;
+    setState(() => _pendingItems.removeAt(idx));
   }
 
   void _viewFullImage(String url) {
@@ -1422,6 +1746,55 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     }
   }
 
+  Future<void> _scrollToMessage(String messageId) async {
+    final index = _currentMessages.indexWhere((m) => m.id == messageId);
+    if (index == -1) return;
+
+    final key = _messageKeys[messageId];
+
+    // If already rendered, scroll directly to it
+    if (key?.currentContext != null) {
+      await Scrollable.ensureVisible(
+        key!.currentContext!,
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeInOut,
+        alignment: 0.3,
+      );
+      _highlightMessage(messageId);
+      return;
+    }
+
+    // Not visible — estimate pixel offset and jump there first
+    // reverse:true → index 0 = bottom (pixels=0), older msgs have higher pixels
+    const avgItemHeight = 72.0;
+    final estimated = (index * avgItemHeight)
+        .clamp(0.0, _scrollCtrl.position.maxScrollExtent);
+    await _scrollCtrl.animateTo(
+      estimated,
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeInOut,
+    );
+
+    // After layout the item is now rendered — snap precisely
+    await WidgetsBinding.instance.endOfFrame;
+    if (key?.currentContext != null) {
+      await Scrollable.ensureVisible(
+        key!.currentContext!,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+        alignment: 0.3,
+      );
+    }
+    _highlightMessage(messageId);
+  }
+
+  void _highlightMessage(String messageId) {
+    setState(() => _highlightedMessageId = messageId);
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _highlightedMessageId = null);
+    });
+  }
+
   Future<void> _sendText() async {
     final text = _textCtrl.text.trim();
     if (text.isEmpty) return;
@@ -1438,6 +1811,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         text: text,
         replyToId: reply?.id,
         replyToText: _replyToPreviewText(msg: reply),
+        replyToImageUrl: _replyToImageUrl(msg: reply),
         replyToSenderId: reply?.senderId,
       );
       _scrollToBottom();
@@ -1456,6 +1830,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     if (m.type == MessageType.image) return '📷 Image';
     if (m.type == MessageType.gif) return '🎞️ GIF';
     if (m.type == MessageType.sticker) return m.text;
+    return null;
+  }
+
+  String? _replyToImageUrl({MessageModel? msg}) {
+    final m = msg ?? _replyingTo;
+    if (m?.type == MessageType.image) return m?.imageUrl;
     return null;
   }
 
@@ -1511,11 +1891,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   }
 
   Future<void> _togglePlay(MessageModel msg) async {
-    if (_playingMessageId == msg.id) {
+    if (_playingNotifier.value == msg.id) {
       await _player.stop();
-      setState(() => _playingMessageId = null);
+      _playingNotifier.value = null;
     } else {
-      setState(() => _playingMessageId = msg.id);
+      _playingNotifier.value = msg.id;
       await _player.play(UrlSource(msg.audioUrl!));
     }
   }
@@ -1537,9 +1917,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     final dt = profile.lastSeen;
     final now = DateTime.now();
     if (DateTime.now().difference(dt).inMinutes < 2) return 'Online';
-    if (_isSameDay(dt, now)) return 'last seen today at ${DateFormat('HH:mm').format(dt)}';
+    if (_isSameDay(dt, now)) return 'last seen today at ${DateFormat('h:mm a').format(dt)}';
     if (_isSameDay(dt, now.subtract(const Duration(days: 1)))) {
-      return 'last seen yesterday at ${DateFormat('HH:mm').format(dt)}';
+      return 'last seen yesterday at ${DateFormat('h:mm a').format(dt)}';
     }
     return 'last seen ${DateFormat('d MMM').format(dt)}';
   }
@@ -1595,6 +1975,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     _recordingTimer?.cancel();
     _recorder.dispose();
     _player.dispose();
+    _playingNotifier.dispose();
     super.dispose();
   }
 }

@@ -1,6 +1,7 @@
 package com.example.calendar_app
 
 import android.app.PictureInPictureParams
+import android.content.Intent
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.os.Build
@@ -51,8 +52,25 @@ class MainActivity : FlutterActivity() {
                     ringtone = null
                     result.success(null)
                 }
+                "startCallService" -> {
+                    val name = call.arguments as? String ?: "Contact"
+                    startService(CallForegroundService.startIntent(this, name))
+                    result.success(null)
+                }
+                "stopCallService" -> {
+                    startService(CallForegroundService.stopIntent(this))
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
+        }
+    }
+
+    // Forward foreground-service notification tap to Flutter
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == "ACTION_RETURN_TO_CALL") {
+            systemChannel?.invokeMethod("returnToCall", null)
         }
     }
 

@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:math' show Random;
+import 'package:audioplayers/audioplayers.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
@@ -14,6 +16,7 @@ import '../services/chat_service.dart';
 import '../services/notes_service.dart';
 import '../services/expense_service.dart';
 import '../services/notification_service.dart';
+import '../services/system_services.dart';
 import '../screens/call_screen.dart';
 import '../screens/incoming_call_screen.dart';
 import '../screens/chat_detail_screen.dart';
@@ -37,11 +40,17 @@ class AppProvider extends ChangeNotifier {
 
   StreamSubscription<QuerySnapshot>? _incomingCallSub;
   StreamSubscription<QuerySnapshot>? _chatDeliverySub;
+  StreamSubscription<QuerySnapshot>? _inAppNotifSub;
   // Tracks callIds currently being shown in IncomingCallScreen to avoid duplicates
   final Set<String> _showingCallIds = {};
   // Tracks "chatId:messageTimestamp" pairs already marked delivered this session
   // to prevent the write→snapshot→write infinite loop
   final Set<String> _deliveredKeys = {};
+  // In-app notification state
+  final Map<String, int?> _lastMsgMillis = {};
+  final Map<String, String> _chatPartnerNames = {};
+  OverlayEntry? _currentBanner;
+  final AudioPlayer _notifPlayer = AudioPlayer();
 
   String? _userId;
   UserProfileModel? _profile;
@@ -111,6 +120,7 @@ class AppProvider extends ChangeNotifier {
       _subscribeExpenses();
       _listenForIncomingCalls();
       _listenForChatDelivery();
+      _startInAppNotifications();
       unawaited(_saveFcmToken());
       _setupCallNotificationHandlers();
       _isLoading = false;
@@ -167,6 +177,7 @@ class AppProvider extends ChangeNotifier {
     // Restart listeners so they use the correct (possibly restored) chatUserId.
     _listenForIncomingCalls();
     _listenForChatDelivery();
+    _startInAppNotifications();
 
     // Re-subscribe to notes/expenses using the profile UID (chatUserId is now existing.uid)
     _subscribeNotes();
@@ -475,6 +486,127 @@ class AppProvider extends ChangeNotifier {
     )).then((_) => _showingCallIds.remove(callId));
   }
 
+  // ── In-app message notifications ─────────────────────────────────────────
+
+  void _startInAppNotifications() {
+    _inAppNotifSub?.cancel();
+    _lastMsgMillis.clear();
+    _chatPartnerNames.clear();
+    _inAppNotifSub = _chatService.allChatsFor(chatUserId).listen((snap) async {
+      for (final change in snap.docChanges) {
+        if (change.type == DocumentChangeType.removed) continue;
+        final data = change.doc.data() as Map<String, dynamic>?;
+        if (data == null) continue;
+        final chatDocId = change.doc.id;
+        final lastSenderId = data['lastSenderId'] as String?;
+        final lastMsgTime = data['lastMessageTime'] as Timestamp?;
+        final msgMillis = lastMsgTime?.millisecondsSinceEpoch ?? 0;
+
+        // First time seeing this chat → record baseline, no notification
+        if (!_lastMsgMillis.containsKey(chatDocId)) {
+          _lastMsgMillis[chatDocId] = msgMillis;
+          continue;
+        }
+        // Nothing changed
+        if (_lastMsgMillis[chatDocId] == msgMillis) continue;
+        _lastMsgMillis[chatDocId] = msgMillis;
+
+        // We sent it
+        if (lastSenderId == null || lastSenderId == chatUserId) continue;
+
+        // Skip stale messages (e.g. received while offline, replayed on reconnect)
+        final age = DateTime.now()
+            .difference(lastMsgTime?.toDate() ?? DateTime.now())
+            .inSeconds;
+        if (age > 15) continue;
+
+        // Resolve sender name (cached per chat)
+        String senderName = _chatPartnerNames[chatDocId] ?? '';
+        if (senderName.isEmpty) {
+          final profile = await _chatService.getUserProfile(lastSenderId);
+          senderName = profile?.name ?? 'Someone';
+          _chatPartnerNames[chatDocId] = senderName;
+        }
+
+        // Always play a short tone
+        _playNotifTone();
+
+        // If u1 is actively viewing THIS chat → tone only, no banner
+        if (ActiveChatTracker.activeChatId == chatDocId) continue;
+
+        // Choose display text based on which screen u1 is on
+        final lastMsg = (data['lastMessage'] as String?) ?? '';
+        final bool inChatSection =
+            ChatListTracker.isActive || ActiveChatTracker.activeChatId != null;
+
+        final String displayMsg;
+        if (inChatSection) {
+          displayMsg = lastMsg.isEmpty ? '📷 Media' : lastMsg;
+        } else {
+          const randoms = [
+            '📬 New message!',
+            '💬 Someone texted you',
+            '🔔 You have a new message',
+            '💭 New message waiting',
+            '✉️ Check your messages',
+            '👋 Someone wants to chat!',
+          ];
+          displayMsg = randoms[Random().nextInt(randoms.length)];
+        }
+
+        _showInAppBanner(senderName: senderName, message: displayMsg);
+      }
+    });
+  }
+
+  void _playNotifTone() {
+    _notifPlayer.stop().then((_) async {
+      await _notifPlayer.setVolume(0.35);
+      await _notifPlayer.play(AssetSource('sounds/ringtone.mp3'));
+      Future.delayed(const Duration(milliseconds: 700),
+          () => _notifPlayer.stop().ignore());
+    }).ignore();
+  }
+
+  void _showInAppBanner({
+    required String senderName,
+    required String message,
+  }) {
+    final overlayState = navigatorKey.currentState?.overlay;
+    if (overlayState == null) return;
+
+    // Dismiss any previous banner without animation (replacing it)
+    try {
+      _currentBanner?.remove();
+    } catch (_) {}
+    _currentBanner = null;
+
+    late OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (_) => _InAppBanner(
+        senderName: senderName,
+        message: message,
+        onDismiss: () {
+          try {
+            entry.remove();
+          } catch (_) {}
+          if (_currentBanner == entry) _currentBanner = null;
+        },
+      ),
+    );
+    overlayState.insert(entry);
+    _currentBanner = entry;
+
+    Future.delayed(const Duration(seconds: 3), () {
+      if (_currentBanner == entry) {
+        try {
+          entry.remove();
+        } catch (_) {}
+        _currentBanner = null;
+      }
+    });
+  }
+
   // ── Call notification handlers ────────────────────────────────────────────
   void _setupCallNotificationHandlers() {
     // Incoming call notification tap → pop everything back to the calendar home screen.
@@ -484,6 +616,9 @@ class AppProvider extends ChangeNotifier {
 
     // Ongoing call notification tap → return to active voice call
     NotificationService.onOngoingCallNotificationTap = _returnToActiveCall;
+
+    // Foreground service notification tap (native Android) → same
+    SystemServices.onReturnToCall = _returnToActiveCall;
 
     // Background FCM tap → same: go to home screen
     FirebaseMessaging.onMessageOpenedApp.listen((msg) {
@@ -498,6 +633,9 @@ class AppProvider extends ChangeNotifier {
 
   void _returnToActiveCall() {
     if (!_callService.isInCall) return;
+    // If the screen is already in the navigation stack (user pressed HOME instead
+    // of the minimize button), the app simply comes to the foreground — no push needed.
+    if (CallScreen.isOnStack) return;
     final otherUser = _callService.minimizedOtherUser;
     final callType = _callService.minimizedCallType;
     final currentUid = _callService.minimizedCurrentUid;
@@ -523,6 +661,143 @@ class AppProvider extends ChangeNotifier {
     _expensesSub?.cancel();
     _incomingCallSub?.cancel();
     _chatDeliverySub?.cancel();
+    _inAppNotifSub?.cancel();
+    _notifPlayer.dispose();
     super.dispose();
+  }
+}
+
+// ── In-app notification banner ─────────────────────────────────────────────────
+
+class _InAppBanner extends StatefulWidget {
+  final String senderName;
+  final String message;
+  final VoidCallback onDismiss;
+  const _InAppBanner({
+    required this.senderName,
+    required this.message,
+    required this.onDismiss,
+  });
+
+  @override
+  State<_InAppBanner> createState() => _InAppBannerState();
+}
+
+class _InAppBannerState extends State<_InAppBanner>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<Offset> _slide;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 280));
+    _slide = Tween<Offset>(begin: const Offset(0, -1.5), end: Offset.zero)
+        .animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOut));
+    _ctrl.forward();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _dismiss() async {
+    if (!mounted) return;
+    await _ctrl.reverse();
+    widget.onDismiss();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      child: SafeArea(
+        bottom: false,
+        child: SlideTransition(
+          position: _slide,
+          child: GestureDetector(
+            onTap: _dismiss,
+            onVerticalDragEnd: (d) {
+              if ((d.primaryVelocity ?? 0) < -100) _dismiss();
+            },
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF5C35D1),
+                  borderRadius: BorderRadius.circular(14),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.25),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 18,
+                      backgroundColor: Colors.white.withValues(alpha: 0.2),
+                      child: Text(
+                        widget.senderName.isNotEmpty
+                            ? widget.senderName[0].toUpperCase()
+                            : '?',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            widget.senderName,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 13,
+                            ),
+                          ),
+                          const SizedBox(height: 1),
+                          Text(
+                            widget.message,
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 12,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: _dismiss,
+                      child: const Icon(Icons.close_rounded,
+                          color: Colors.white54, size: 18),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

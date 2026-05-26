@@ -30,11 +30,16 @@ class ReadOnlyChatScreen extends StatefulWidget {
 
 class _ReadOnlyChatScreenState extends State<ReadOnlyChatScreen> {
   final AudioPlayer _player = AudioPlayer();
+  final ScrollController _scrollController = ScrollController();
+  late final Stream<List<MessageModel>> _messagesStream;
   String? _playingMessageId;
 
   @override
   void initState() {
     super.initState();
+    // Create stream once — recreating it on every build causes StreamBuilder to
+    // resubscribe, which resets the ListView and jumps the scroll position.
+    _messagesStream = ChatService().messages(widget.uid1, widget.uid2);
     _player.onPlayerComplete.listen((_) {
       if (mounted) setState(() => _playingMessageId = null);
     });
@@ -43,6 +48,7 @@ class _ReadOnlyChatScreenState extends State<ReadOnlyChatScreen> {
   @override
   void dispose() {
     _player.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -102,7 +108,7 @@ class _ReadOnlyChatScreenState extends State<ReadOnlyChatScreen> {
         ],
       ),
       body: StreamBuilder<List<MessageModel>>(
-        stream: ChatService().messages(widget.uid1, widget.uid2),
+        stream: _messagesStream,
         builder: (ctx, snap) {
           if (snap.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
@@ -115,19 +121,27 @@ class _ReadOnlyChatScreenState extends State<ReadOnlyChatScreen> {
             );
           }
           return ListView.builder(
+            controller: _scrollController,
+            reverse: true,
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
             itemCount: messages.length,
             itemBuilder: (ctx, i) {
-              final msg = messages[i];
+              // reverse: true → index 0 = newest (bottom), high index = oldest (top)
+              final msg = messages[messages.length - 1 - i];
               final isUid1 = msg.senderId == widget.uid1;
               final senderName = isUid1 ? widget.name1 : widget.name2;
-              final showDate = i == 0 ||
-                  !_sameDay(messages[i - 1].timestamp, msg.timestamp);
+              // olderMsg = the message visually above this one (one index higher)
+              final olderMsg = i < messages.length - 1
+                  ? messages[messages.length - 2 - i]
+                  : null;
+              final showDate = olderMsg == null ||
+                  !_sameDay(olderMsg.timestamp, msg.timestamp);
               final showName =
-                  i == 0 || messages[i - 1].senderId != msg.senderId;
+                  olderMsg == null || olderMsg.senderId != msg.senderId;
+              // Date divider goes AFTER bubble so it appears visually above it
+              // (reversed list: second child in Column = higher on screen)
               return Column(
                 children: [
-                  if (showDate) _DateDivider(dt: msg.timestamp),
                   _ReadOnlyBubble(
                     msg: msg,
                     isLeft: isUid1,
@@ -136,6 +150,7 @@ class _ReadOnlyChatScreenState extends State<ReadOnlyChatScreen> {
                     isPlaying: _playingMessageId == msg.id,
                     onTogglePlay: () => _togglePlay(msg),
                   ),
+                  if (showDate) _DateDivider(dt: msg.timestamp),
                 ],
               );
             },

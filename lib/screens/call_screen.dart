@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:flutter/material.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:provider/provider.dart';
 import '../constants/app_theme.dart';
 import '../models/call_model.dart';
@@ -13,6 +14,11 @@ import '../services/system_services.dart';
 enum _CallState { connecting, ringing, connected, ended, declined }
 
 class CallScreen extends StatefulWidget {
+  // True while any CallScreen instance is in the navigation stack.
+  // Used by _returnToActiveCall to avoid pushing a duplicate when the user
+  // pressed HOME instead of the minimize button.
+  static bool isOnStack = false;
+
   final String callId;
   final bool isOutgoing;
   final CallType callType;
@@ -54,6 +60,8 @@ class _CallScreenState extends State<CallScreen> {
   @override
   void initState() {
     super.initState();
+    CallScreen.isOnStack = true;
+    WakelockPlus.enable();
     SystemServices.onPipModeChanged = (isInPip) {
       if (mounted) setState(() => _isInPipMode = isInPip);
     };
@@ -111,6 +119,14 @@ class _CallScreenState extends State<CallScreen> {
       },
       onStatusChange: _handleStatusChange,
     );
+    // Start foreground service immediately — callee is already in the channel
+    _callService.setMinimizedMeta(
+      otherUser: widget.otherUser,
+      callType: widget.callType,
+      currentUid: widget.currentUid,
+      isOutgoing: false,
+    );
+    await SystemServices.startCallService(widget.otherUser.name);
   }
 
   void _handleStatusChange(String status) {
@@ -119,6 +135,14 @@ class _CallScreenState extends State<CallScreen> {
       setState(() => _callState = _CallState.ringing);
     } else if (status == 'connected') {
       setState(() => _callState = _CallState.connected);
+      // Store meta now so notification tap can restore the screen without minimize
+      _callService.setMinimizedMeta(
+        otherUser: widget.otherUser,
+        callType: widget.callType,
+        currentUid: widget.currentUid,
+        isOutgoing: widget.isOutgoing,
+      );
+      SystemServices.startCallService(widget.otherUser.name).ignore();
       _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
         if (mounted) setState(() => _durationSeconds++);
       });
@@ -133,6 +157,7 @@ class _CallScreenState extends State<CallScreen> {
     _durationTimer?.cancel();
     if (_isVideo) SystemServices.setPipEnabled(false).ignore();
     NotificationService.cancelOngoingCallNotification().ignore();
+    SystemServices.stopCallService().ignore();
     if (mounted) setState(() {
       _remoteUid = null;
       _callState = reason;
@@ -153,6 +178,7 @@ class _CallScreenState extends State<CallScreen> {
     try {
       if (_isVideo) await SystemServices.setPipEnabled(false);
       await NotificationService.cancelOngoingCallNotification();
+      await SystemServices.stopCallService();
     } catch (_) {}
     if (mounted) Navigator.pop(context);
   }
@@ -170,16 +196,14 @@ class _CallScreenState extends State<CallScreen> {
       onStatusChange: (status) {
         if (status == 'ended' || status == 'declined') {
           _callService.cleanup();
+          SystemServices.stopCallService().ignore();
         }
       },
     );
     CallService.onCallEndedExternally = () {
-      NotificationService.cancelOngoingCallNotification().ignore();
+      SystemServices.stopCallService().ignore();
     };
-    await NotificationService.showOngoingCallNotification(
-      otherUserName: widget.otherUser.name,
-      callId: widget.callId,
-    );
+    // Foreground service notification is already visible — no separate notification needed
     if (mounted) Navigator.pop(context);
   }
 
@@ -447,6 +471,8 @@ class _CallScreenState extends State<CallScreen> {
 
   @override
   void dispose() {
+    CallScreen.isOnStack = false;
+    WakelockPlus.disable();
     SystemServices.onPipModeChanged = null;
     _durationTimer?.cancel();
     if (!_minimized) _callService.cleanup();
