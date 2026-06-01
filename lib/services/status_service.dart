@@ -89,6 +89,7 @@ class StatusService {
     String? musicUrl,
     String? musicName,
     String? musicArtist,
+    int? musicStartMs,
   }) async {
     final id = _uuid.v4();
     final ref = _storage.ref('statuses/$uid/$id.jpg');
@@ -103,6 +104,7 @@ class StatusService {
       if (musicUrl != null) 'musicUrl': musicUrl,
       if (musicName != null) 'musicName': musicName,
       if (musicArtist != null) 'musicArtist': musicArtist,
+      if (musicStartMs != null && musicStartMs > 0) 'musicStartMs': musicStartMs,
       'createdAt': Timestamp.fromDate(now),
       'expiresAt': Timestamp.fromDate(now.add(const Duration(hours: 24))),
       'viewers': {},

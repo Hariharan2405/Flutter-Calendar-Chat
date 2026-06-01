@@ -8,6 +8,7 @@ import 'package:video_player/video_player.dart';
 import '../constants/app_theme.dart';
 import '../services/status_service.dart';
 import '../utils/snack_util.dart';
+import 'image_edit_screen.dart';
 
 class StatusCreateScreen extends StatefulWidget {
   final String uid;
@@ -28,6 +29,8 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
   String? _musicUrl;
   String? _musicName;
   String? _musicArtist;
+  double _musicStartSec = 0;
+  double _musicDurationSec = 0;
   bool _isUploading = false;
   bool _isPreviewingMusic = false;
 
@@ -39,14 +42,16 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
     super.dispose();
   }
 
-  // ── Pick media ────────────────────────────────────────────────────────────────
+  // ── Pick / edit media ─────────────────────────────────────────────────────────
 
   Future<void> _pickMedia(ImageSource source, String type) async {
     XFile? file;
     if (type == 'photo') {
       file = await ImagePicker().pickImage(source: source, imageQuality: 85);
     } else {
-      file = await ImagePicker().pickVideo(source: source);
+      // 60-second cap matches WhatsApp
+      file = await ImagePicker()
+          .pickVideo(source: source, maxDuration: const Duration(seconds: 60));
     }
     if (file == null || !mounted) return;
 
@@ -68,7 +73,20 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
         _musicUrl = null;
         _musicName = null;
         _musicArtist = null;
+        _musicStartSec = 0;
+        _musicDurationSec = 0;
       });
+    }
+  }
+
+  Future<void> _editImage() async {
+    if (_mediaFile == null) return;
+    final edited = await Navigator.push<File>(
+      context,
+      MaterialPageRoute(builder: (_) => ImageEditScreen(imageFile: _mediaFile!)),
+    );
+    if (edited != null && mounted) {
+      setState(() => _mediaFile = edited);
     }
   }
 
@@ -90,14 +108,23 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
                   color: AppColors.divider,
                   borderRadius: BorderRadius.circular(2)),
             ),
-            _sheetTile(Icons.photo_camera_rounded, 'Photo — Camera',
-                () { Navigator.pop(ctx); _pickMedia(ImageSource.camera, 'photo'); }),
-            _sheetTile(Icons.photo_library_rounded, 'Photo — Gallery',
-                () { Navigator.pop(ctx); _pickMedia(ImageSource.gallery, 'photo'); }),
-            _sheetTile(Icons.videocam_rounded, 'Video — Camera',
-                () { Navigator.pop(ctx); _pickMedia(ImageSource.camera, 'video'); }),
-            _sheetTile(Icons.video_library_rounded, 'Video — Gallery',
-                () { Navigator.pop(ctx); _pickMedia(ImageSource.gallery, 'video'); }),
+            _sheetTile(Icons.photo_camera_rounded, 'Photo — Camera', () {
+              Navigator.pop(ctx);
+              _pickMedia(ImageSource.camera, 'photo');
+            }),
+            _sheetTile(Icons.photo_library_rounded, 'Photo — Gallery', () {
+              Navigator.pop(ctx);
+              _pickMedia(ImageSource.gallery, 'photo');
+            }),
+            _sheetTile(Icons.videocam_rounded, 'Video — Camera (max 60s)', () {
+              Navigator.pop(ctx);
+              _pickMedia(ImageSource.camera, 'video');
+            }),
+            _sheetTile(Icons.video_library_rounded, 'Video — Gallery (max 60s)',
+                () {
+              Navigator.pop(ctx);
+              _pickMedia(ImageSource.gallery, 'video');
+            }),
             const SizedBox(height: 8),
           ],
         ),
@@ -125,13 +152,31 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
         statusService: _statusService,
         uid: widget.uid,
         previewPlayer: _previewPlayer,
-        onSelected: (url, name, artist) {
+        onSelected: (url, name, artist) async {
           Navigator.pop(ctx);
+          await _previewPlayer.stop();
           setState(() {
             _musicUrl = url;
             _musicName = name;
             _musicArtist = artist;
+            _musicStartSec = 0;
+            _musicDurationSec = 0;
+            _isPreviewingMusic = false;
           });
+          // Play briefly to get track duration for trim slider
+          try {
+            await _previewPlayer.play(UrlSource(url));
+            final dur = await _previewPlayer.onDurationChanged.first
+                .timeout(const Duration(seconds: 8));
+            await _previewPlayer.stop();
+            if (mounted) {
+              setState(() => _musicDurationSec = dur.inMilliseconds / 1000.0);
+            }
+          } catch (_) {
+            try {
+              await _previewPlayer.stop();
+            } catch (_) {}
+          }
         },
       ),
     );
@@ -168,6 +213,9 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
           musicUrl: _musicUrl,
           musicName: _musicName,
           musicArtist: _musicArtist,
+          musicStartMs: _musicStartSec > 0
+              ? (_musicStartSec * 1000).round()
+              : null,
         );
       } else {
         await _statusService.uploadVideoStatus(
@@ -198,8 +246,7 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         iconTheme: const IconThemeData(color: Colors.white),
-        title: const Text('New Status',
-            style: TextStyle(color: Colors.white)),
+        title: const Text('New Status', style: TextStyle(color: Colors.white)),
         actions: [
           if (_mediaFile != null)
             _isUploading
@@ -290,15 +337,16 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
                 left: 16,
                 right: 16,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 8),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                   decoration: BoxDecoration(
                     color: Colors.black.withValues(alpha: 0.5),
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: TextField(
                     controller: _captionCtrl,
-                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                    style:
+                        const TextStyle(color: Colors.white, fontSize: 14),
                     maxLines: 3,
                     minLines: 1,
                     decoration: const InputDecoration(
@@ -320,7 +368,6 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Change media
               Row(
                 children: [
                   _toolBtn(
@@ -328,7 +375,15 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
                     label: 'Change',
                     onTap: _showPickerSheet,
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 8),
+                  // Edit button for images
+                  if (_mediaType == 'photo')
+                    _toolBtn(
+                      icon: Icons.edit_rounded,
+                      label: 'Edit',
+                      onTap: _editImage,
+                    ),
+                  const SizedBox(width: 8),
                   if (_mediaType == 'photo') ...[
                     Expanded(
                       child: GestureDetector(
@@ -388,6 +443,8 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
                                     _musicUrl = null;
                                     _musicName = null;
                                     _musicArtist = null;
+                                    _musicStartSec = 0;
+                                    _musicDurationSec = 0;
                                     _previewPlayer.stop();
                                   }),
                                   child: const Icon(Icons.close_rounded,
@@ -400,11 +457,54 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
                       ),
                     ),
                   ] else
-                    const Expanded(
-                      child: SizedBox(),
-                    ),
+                    const Expanded(child: SizedBox()),
                 ],
               ),
+              // Music trim slider — shown when a track is selected and duration known
+              if (_musicUrl != null && _musicDurationSec > 5) ...[
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    const Icon(Icons.content_cut_rounded,
+                        color: Colors.white54, size: 16),
+                    const SizedBox(width: 6),
+                    const Text('Start:',
+                        style:
+                            TextStyle(color: Colors.white70, fontSize: 12)),
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 7),
+                          overlayShape: const RoundSliderOverlayShape(
+                              overlayRadius: 14),
+                          trackHeight: 3,
+                        ),
+                        child: Slider(
+                          value: _musicStartSec,
+                          min: 0,
+                          max: (_musicDurationSec - 5)
+                              .clamp(0.0, _musicDurationSec),
+                          label: '${_musicStartSec.round()}s',
+                          activeColor: AppColors.primary,
+                          inactiveColor: Colors.white24,
+                          onChanged: (v) =>
+                              setState(() => _musicStartSec = v),
+                        ),
+                      ),
+                    ),
+                    SizedBox(
+                      width: 32,
+                      child: Text(
+                        '${_musicStartSec.round()}s',
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 11),
+                        textAlign: TextAlign.right,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
           ),
         ),
@@ -431,7 +531,8 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
             Icon(icon, color: Colors.white70, size: 18),
             const SizedBox(width: 6),
             Text(label,
-                style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                style:
+                    const TextStyle(color: Colors.white70, fontSize: 13)),
           ],
         ),
       ),
@@ -474,9 +575,15 @@ class _MusicPickerSheetState extends State<_MusicPickerSheet> {
 
   Future<void> _search(String q) async {
     if (q.trim().isEmpty) return;
-    setState(() { _loading = true; _results = []; });
+    setState(() {
+      _loading = true;
+      _results = [];
+    });
     final results = await widget.statusService.searchMusic(q.trim());
-    if (mounted) setState(() { _loading = false; _results = results; });
+    if (mounted) setState(() {
+      _loading = false;
+      _results = results;
+    });
   }
 
   Future<void> _togglePreview(MusicTrack track) async {
@@ -509,8 +616,8 @@ class _MusicPickerSheetState extends State<_MusicPickerSheet> {
       if (mounted) widget.onSelected(url, name, 'Local');
     } catch (_) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('Failed to upload music')));
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to upload music')));
       }
     } finally {
       if (mounted) setState(() => _uploadingLocal = false);
@@ -593,11 +700,14 @@ class _MusicPickerSheetState extends State<_MusicPickerSheet> {
                       children: [
                         Icon(Icons.music_note_rounded,
                             size: 48,
-                            color: AppColors.textSecondary.withValues(alpha: 0.3)),
+                            color: AppColors.textSecondary
+                                .withValues(alpha: 0.3)),
                         const SizedBox(height: 12),
-                        Text('Search for a song to add to your status',
+                        Text(
+                            'Search for a song to add to your status',
                             style: TextStyle(
-                                color: AppColors.textSecondary.withValues(alpha: 0.6),
+                                color: AppColors.textSecondary
+                                    .withValues(alpha: 0.6),
                                 fontSize: 13),
                             textAlign: TextAlign.center),
                       ],
@@ -622,7 +732,8 @@ class _MusicPickerSheetState extends State<_MusicPickerSheet> {
                                     width: 46,
                                     height: 46,
                                     color: AppColors.divider,
-                                    child: const Icon(Icons.music_note_rounded,
+                                    child: const Icon(
+                                        Icons.music_note_rounded,
                                         size: 22,
                                         color: AppColors.textSecondary),
                                   ),
@@ -637,7 +748,8 @@ class _MusicPickerSheetState extends State<_MusicPickerSheet> {
                                 ),
                         ),
                         title: Text(t.name,
-                            maxLines: 1, overflow: TextOverflow.ellipsis),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis),
                         subtitle: Text(t.artist,
                             style: const TextStyle(fontSize: 12),
                             maxLines: 1,
@@ -658,8 +770,8 @@ class _MusicPickerSheetState extends State<_MusicPickerSheet> {
                             IconButton(
                               icon: const Icon(Icons.check_circle_rounded,
                                   color: AppColors.primary),
-                              onPressed: () =>
-                                  widget.onSelected(t.previewUrl, t.name, t.artist),
+                              onPressed: () => widget.onSelected(
+                                  t.previewUrl, t.name, t.artist),
                               tooltip: 'Use this song',
                             ),
                           ],

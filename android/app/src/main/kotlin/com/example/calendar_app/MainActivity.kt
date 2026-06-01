@@ -61,6 +61,13 @@ class MainActivity : FlutterActivity() {
                     startService(CallForegroundService.stopIntent(this))
                     result.success(null)
                 }
+                "closePip" -> {
+                    // Dismiss the system PiP window by moving the task to background.
+                    // This is the correct way to close PiP on Android without
+                    // bringing the activity back to full-screen first.
+                    moveTaskToBack(true)
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }

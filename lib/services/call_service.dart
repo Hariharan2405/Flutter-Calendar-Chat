@@ -31,6 +31,10 @@ class CallService {
   bool? minimizedIsOutgoing;
 
   static void Function()? onCallEndedExternally;
+  // Called when call is minimized (screen popped but engine still running)
+  static void Function()? onCallMinimized;
+  // Called on cleanup() — persistent, not nulled after fire
+  static void Function()? onCallEnded;
 
   String? activeCallId;
   bool _isMuted = false;
@@ -52,6 +56,7 @@ class CallService {
   bool get isConnected => _isConnected;
   int? get remoteUid => _remoteUid;
   RtcEngine? get engine => _engine;
+  DateTime? get callConnectedAt => _callConnectedAt;
 
   // ── Engine setup ──────────────────────────────────────────────────────────
 
@@ -268,6 +273,16 @@ class CallService {
     await _engine?.muteLocalVideoStream(_isVideoOff);
   }
 
+  // Re-subscribes to the remote video stream after the view is re-created (e.g. on restore from PiP).
+  Future<void> refreshRemoteVideo() async {
+    if (_engine == null || _remoteUid == null) return;
+    try {
+      await _engine!.muteRemoteVideoStream(uid: _remoteUid!, mute: true);
+      await Future.delayed(const Duration(milliseconds: 50));
+      await _engine!.muteRemoteVideoStream(uid: _remoteUid!, mute: false);
+    } catch (_) {}
+  }
+
   // ── End / decline ─────────────────────────────────────────────────────────
 
   Future<void> endCall() async {
@@ -333,6 +348,7 @@ class CallService {
     minimizedCurrentUid = null;
     minimizedIsOutgoing = null;
 
+    onCallEnded?.call(); // persistent — not nulled
     onCallEndedExternally?.call();
     onCallEndedExternally = null;
   }

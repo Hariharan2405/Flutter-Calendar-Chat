@@ -51,6 +51,7 @@ class _CallScreenState extends State<CallScreen> {
   bool _minimized = false;
   bool _isInPipMode = false;
   bool _isHangingUp = false;
+  bool _isMinimizing = false;
 
   int _durationSeconds = 0;
   Timer? _durationTimer;
@@ -69,10 +70,8 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Future<void> _init() async {
-    if (_isVideo) await SystemServices.setPipEnabled(true);
-
     if (widget.isRestoring) {
-      await NotificationService.cancelOngoingCallNotification();
+      // Sync state immediately — no awaits before showing remote video.
       _callService.updateCallbacks(
         onRemoteUserJoined: (uid) {
           if (mounted) setState(() => _remoteUid = uid);
@@ -88,10 +87,25 @@ class _CallScreenState extends State<CallScreen> {
           if (_callService.isConnected) _callState = _CallState.connected;
         });
       }
-    } else if (widget.isOutgoing) {
-      await _startOutgoing();
+      // Background async tasks — don't block the video view from mounting.
+      await NotificationService.cancelOngoingCallNotification();
+      if (_isVideo) {
+        await SystemServices.setPipEnabled(true);
+        // After the AgoraVideoView is mounted, force Agora to re-subscribe to the
+        // remote stream on the new native surface (fixes blank video after PiP restore).
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          Future.delayed(const Duration(milliseconds: 150), () {
+            if (mounted) _callService.refreshRemoteVideo().ignore();
+          });
+        });
+      }
     } else {
-      await _startIncoming();
+      if (_isVideo) await SystemServices.setPipEnabled(true);
+      if (widget.isOutgoing) {
+        await _startOutgoing();
+      } else {
+        await _startIncoming();
+      }
     }
   }
 
@@ -108,6 +122,7 @@ class _CallScreenState extends State<CallScreen> {
       },
       onStatusChange: _handleStatusChange,
     );
+    if (mounted) setState(() {}); // Force UI refresh now that engine is initialized
   }
 
   Future<void> _startIncoming() async {
@@ -119,6 +134,7 @@ class _CallScreenState extends State<CallScreen> {
       },
       onStatusChange: _handleStatusChange,
     );
+    if (mounted) setState(() {}); // Force UI refresh now that engine is initialized
     // Start foreground service immediately — callee is already in the channel
     _callService.setMinimizedMeta(
       otherUser: widget.otherUser,
@@ -158,6 +174,16 @@ class _CallScreenState extends State<CallScreen> {
     if (_isVideo) SystemServices.setPipEnabled(false).ignore();
     NotificationService.cancelOngoingCallNotification().ignore();
     SystemServices.stopCallService().ignore();
+
+    if (_isInPipMode) {
+      // Call ended while the system PiP window is open.
+      // Dismiss the PiP window immediately — no UI update needed since
+      // the user is in another app. moveTaskToBack(true) closes the window.
+      SystemServices.closePip().ignore();
+      _callService.cleanup();
+      return;
+    }
+
     if (mounted) setState(() {
       _remoteUid = null;
       _callState = reason;
@@ -183,7 +209,10 @@ class _CallScreenState extends State<CallScreen> {
     if (mounted) Navigator.pop(context);
   }
 
-  Future<void> _minimizeVoiceCall() async {
+  Future<void> _minimizeCall() async {
+    if (_isMinimizing) return;
+    setState(() => _isMinimizing = true);
+
     _minimized = true;
     _callService.setMinimizedMeta(
       otherUser: widget.otherUser,
@@ -203,8 +232,12 @@ class _CallScreenState extends State<CallScreen> {
     CallService.onCallEndedExternally = () {
       SystemServices.stopCallService().ignore();
     };
-    // Foreground service notification is already visible — no separate notification needed
-    if (mounted) Navigator.pop(context);
+
+    // Wait 1 frame so AgoraVideoView is removed from CallScreen and fully disposed.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) Navigator.pop(context);
+      CallService.onCallMinimized?.call();
+    });
   }
 
   String get _statusText {
@@ -235,9 +268,9 @@ class _CallScreenState extends State<CallScreen> {
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
         if (_isVideo) {
-          await SystemServices.enterPip();
+          await SystemServices.enterPip(); // back/swipe → system PiP
         } else {
-          await _minimizeVoiceCall();
+          await _minimizeCall();
         }
       },
       child: Scaffold(
@@ -285,6 +318,11 @@ class _CallScreenState extends State<CallScreen> {
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
           _ControlButton(
+            icon: Icons.keyboard_arrow_down_rounded,
+            label: 'Minimise',
+            onTap: _minimizeCall,
+          ),
+          _ControlButton(
             icon: _isMuted ? Icons.mic_off_rounded : Icons.mic_rounded,
             label: _isMuted ? 'Unmute' : 'Mute',
             onTap: () async {
@@ -320,12 +358,16 @@ class _CallScreenState extends State<CallScreen> {
   // ── Video call UI ─────────────────────────────────────────────────────────
 
   Widget _buildVideoCall() {
+    if (_isMinimizing) {
+      return Container(color: const Color(0xFF1A0A3C));
+    }
     final engine = _callService.engine;
     return Stack(
       children: [
         // Remote video full screen — or avatar placeholder while connecting
         _remoteUid != null && engine != null
             ? AgoraVideoView(
+                key: ValueKey('remote_${_remoteUid}_${widget.callId}'),
                 controller: VideoViewController.remote(
                   rtcEngine: engine,
                   canvas: VideoCanvas(uid: _remoteUid!),
@@ -381,6 +423,7 @@ class _CallScreenState extends State<CallScreen> {
                         child: const Icon(Icons.videocam_off_rounded,
                             color: Colors.white54, size: 28))
                     : AgoraVideoView(
+                        key: const ValueKey('local_video'),
                         controller: VideoViewController(
                           rtcEngine: engine,
                           canvas: const VideoCanvas(uid: 0),
@@ -422,6 +465,11 @@ class _CallScreenState extends State<CallScreen> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
       children: [
+        _ControlButton(
+          icon: Icons.keyboard_arrow_down_rounded,
+          label: 'Minimise',
+          onTap: _minimizeCall,
+        ),
         _ControlButton(
           icon: _isMuted ? Icons.mic_off_rounded : Icons.mic_rounded,
           label: _isMuted ? 'Unmute' : 'Mute',
@@ -473,9 +521,12 @@ class _CallScreenState extends State<CallScreen> {
   void dispose() {
     CallScreen.isOnStack = false;
     WakelockPlus.disable();
-    SystemServices.onPipModeChanged = null;
     _durationTimer?.cancel();
-    if (!_minimized) _callService.cleanup();
+    if (!_minimized) {
+      SystemServices.onPipModeChanged = null;
+      if (_isVideo) SystemServices.setPipEnabled(false).ignore();
+      _callService.cleanup();
+    }
     super.dispose();
   }
 }

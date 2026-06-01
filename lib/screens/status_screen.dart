@@ -139,6 +139,7 @@ class _StatusScreenState extends State<StatusScreen> {
   void _openViewer(BuildContext context, List<UserStatuses> groups,
       int index, String uid) {
     if (groups.isEmpty) return;
+    final provider = context.read<AppProvider>();
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -146,6 +147,8 @@ class _StatusScreenState extends State<StatusScreen> {
           groups: groups,
           initialGroupIndex: index,
           currentUid: uid,
+          currentUserName: provider.profile?.name ?? '',
+          chatService: _chatService,
         ),
       ),
     );

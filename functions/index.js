@@ -1,10 +1,14 @@
-const { onDocumentCreated } = require('firebase-functions/v2/firestore');
+// Import everything from the top-level firebase-functions package.
+// Using the submodule path (firebase-functions/v2/firestore) hangs the
+// Firebase CLI's analysis process on Node.js 24; the main package works fine.
+const { firestore: { onDocumentCreated, onDocumentDeleted }, logger } = require('firebase-functions');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
-const { logger } = require('firebase-functions');
 
 initializeApp();
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
 
 const REMINDER_MESSAGES = [
   "Don't forget to note your expenses today! 💰",
@@ -29,26 +33,51 @@ function randomMessage() {
 }
 
 /**
- * Fires when a new message is created in chats/{chatId}/messages/{messageId}.
- * Sends a random reminder notification instead of the real message content.
+ * Extracts the Cloud Storage object path from a Firebase download URL.
+ * Format: https://firebasestorage.googleapis.com/v0/b/BUCKET/o/ENCODED%2FPATH?alt=media&token=…
  */
+function storagePathFromUrl(url) {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    const oIndex = u.pathname.indexOf('/o/');
+    if (oIndex === -1) return null;
+    return decodeURIComponent(u.pathname.slice(oIndex + 3));
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Fires when a new call document is created.
- * Sends a high-priority FCM data message to the callee so the app
- * wakes up even when killed and shows a full-screen incoming call UI.
+ * Deletes a media file from Cloud Storage by its download URL.
+ * Silently ignores 404 (already gone) and null/empty URLs.
  */
+async function deleteMediaFile(url) {
+  const path = storagePathFromUrl(url);
+  if (!path) return;
+  try {
+    const { getStorage } = require('firebase-admin/storage');
+    await getStorage().bucket().file(path).delete();
+    logger.info('Deleted media file', { path });
+  } catch (err) {
+    if (err.code !== 404) {
+      logger.warn('Media delete failed (non-404)', { path, code: err.code });
+    }
+  }
+}
+
+// ── Incoming call notification ─────────────────────────────────────────────────
+
 exports.onCallCreated = onDocumentCreated(
   'calls/{callId}',
   async (event) => {
     const callData = event.data.data();
-    // Document is created with status:'calling'. 'ringing' is set later by the
-    // callee's device — so we must fire on 'calling', not 'ringing'.
     if (callData.status !== 'calling') return;
 
-    const calleeId = callData.calleeId;
-    const callerId = callData.callerId;
-    const callId = event.params.callId;
-    const db = getFirestore();
+    const calleeId  = callData.calleeId;
+    const callerId  = callData.callerId;
+    const callId    = event.params.callId;
+    const db        = getFirestore();
 
     const [calleeDoc, callerDoc] = await Promise.all([
       db.collection('user_profiles').doc(calleeId).get(),
@@ -56,7 +85,7 @@ exports.onCallCreated = onDocumentCreated(
     ]);
     if (!calleeDoc.exists) return;
 
-    const fcmToken = calleeDoc.data().fcmToken;
+    const fcmToken   = calleeDoc.data().fcmToken;
     if (!fcmToken) return;
 
     const callerName = callerDoc.exists ? callerDoc.data().name : 'Unknown';
@@ -76,11 +105,11 @@ exports.onCallCreated = onDocumentCreated(
           },
         },
         data: {
-          type: 'incoming_call',
-          callId: callId,
-          callerId: callerId,
+          type:       'incoming_call',
+          callId:     callId,
+          callerId:   callerId,
           callerName: callerName,
-          callType: callData.type,
+          callType:   callData.type,
         },
       });
     } catch (err) {
@@ -95,27 +124,26 @@ exports.onCallCreated = onDocumentCreated(
   }
 );
 
+// ── Chat message notification ──────────────────────────────────────────────────
+
 exports.sendChatNotification = onDocumentCreated(
   'chats/{chatId}/messages/{messageId}',
   async (event) => {
-    const message = event.data.data();
-    const chatId = event.params.chatId;
+    const message  = event.data.data();
+    const chatId   = event.params.chatId;
     const senderId = message.senderId;
 
     if (!senderId) return;
 
-    // Get the chat document to find both participants
     const chatDoc = await getFirestore().collection('chats').doc(chatId).get();
     if (!chatDoc.exists) return;
 
     const participants = chatDoc.data().participants;
     if (!participants || participants.length < 2) return;
 
-    // The recipient is whoever is NOT the sender
     const recipientId = participants.find((uid) => uid !== senderId);
     if (!recipientId) return;
 
-    // Get recipient's FCM token
     const recipientDoc = await getFirestore()
       .collection('user_profiles')
       .doc(recipientId)
@@ -140,7 +168,7 @@ exports.sendChatNotification = onDocumentCreated(
           },
         },
         data: {
-          chatId: chatId,
+          chatId:   chatId,
           senderId: senderId,
         },
       });
@@ -155,5 +183,41 @@ exports.sendChatNotification = onDocumentCreated(
           .update({ fcmToken: null });
       }
     }
+  }
+);
+
+// ── Media cleanup on message deletion ─────────────────────────────────────────
+
+/**
+ * Fires whenever a personal-chat message is deleted — by Firestore TTL
+ * (expireAt field) or by a user manually removing it.
+ * Deletes any associated audio/image/video from Cloud Storage.
+ */
+exports.onPersonalMessageDeleted = onDocumentDeleted(
+  'chats/{chatId}/messages/{messageId}',
+  async (event) => {
+    const data = event.data?.data();
+    if (!data) return;
+    await Promise.all([
+      deleteMediaFile(data.audioUrl),
+      deleteMediaFile(data.imageUrl),
+      deleteMediaFile(data.videoUrl),
+    ]);
+  }
+);
+
+/**
+ * Same as onPersonalMessageDeleted but for group-chat messages.
+ */
+exports.onGroupMessageDeleted = onDocumentDeleted(
+  'group_chats/{groupId}/messages/{messageId}',
+  async (event) => {
+    const data = event.data?.data();
+    if (!data) return;
+    await Promise.all([
+      deleteMediaFile(data.audioUrl),
+      deleteMediaFile(data.imageUrl),
+      deleteMediaFile(data.videoUrl),
+    ]);
   }
 );

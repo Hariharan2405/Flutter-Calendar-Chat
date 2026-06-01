@@ -8,6 +8,7 @@ class StatusModel {
   final String? musicUrl;
   final String? musicName;
   final String? musicArtist;
+  final int? musicStartMs; // ms into track where playback begins
   final String? caption;
   final DateTime createdAt;
   final DateTime expiresAt;
@@ -21,6 +22,7 @@ class StatusModel {
     this.musicUrl,
     this.musicName,
     this.musicArtist,
+    this.musicStartMs,
     this.caption,
     required this.createdAt,
     required this.expiresAt,
@@ -46,6 +48,7 @@ class StatusModel {
       musicUrl: data['musicUrl'] as String?,
       musicName: data['musicName'] as String?,
       musicArtist: data['musicArtist'] as String?,
+      musicStartMs: data['musicStartMs'] as int?,
       caption: data['caption'] as String?,
       createdAt: (data['createdAt'] as Timestamp).toDate(),
       expiresAt: (data['expiresAt'] as Timestamp).toDate(),

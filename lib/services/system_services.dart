@@ -55,4 +55,12 @@ class SystemServices {
       await _channel.invokeMethod('stopCallService');
     } catch (_) {}
   }
+
+  /// Dismisses the system PiP window by sending the task to the background.
+  /// Call this when the call ends while the app is in system PiP mode.
+  static Future<void> closePip() async {
+    try {
+      await _channel.invokeMethod('closePip');
+    } catch (_) {}
+  }
 }

@@ -115,17 +115,15 @@ class ChatService {
 
   Stream<List<MessageModel>> messages(String uid1, String uid2) {
     final id = chatId(uid1, uid2);
-    final cutoff = DateTime.now().subtract(const Duration(days: 7));
+    final cutoff = DateTime.now().subtract(const Duration(days: 3));
     return _db
         .collection('chats')
         .doc(id)
         .collection('messages')
-        .orderBy('timestamp', descending: false)
+        .where('timestamp', isGreaterThan: Timestamp.fromDate(cutoff))
+        .orderBy('timestamp')
         .snapshots()
-        .map((snap) => snap.docs
-            .map(MessageModel.fromFirestore)
-            .where((m) => m.timestamp.isAfter(cutoff))
-            .toList());
+        .map((snap) => snap.docs.map(MessageModel.fromFirestore).toList());
   }
 
   Stream<Map<String, dynamic>?> chatData(String uid1, String uid2) {
@@ -263,6 +261,52 @@ class ChatService {
 
     _updateChatMeta(id, {
       'lastMessage': '📷 Image',
+      'lastSenderId': senderUid,
+      'lastMessageTime': Timestamp.fromDate(now),
+      'unread_$receiverUid': FieldValue.increment(1),
+    });
+  }
+
+  Future<void> sendVideoMessage({
+    required String senderUid,
+    required String receiverUid,
+    required File videoFile,
+    String? replyToId,
+    String? replyToText,
+    String? replyToImageUrl,
+    String? replyToSenderId,
+  }) async {
+    await ensureChatExists(senderUid, receiverUid);
+    final id = chatId(senderUid, receiverUid);
+    final msgId = _uuid.v4();
+    final now = DateTime.now();
+
+    final ext = videoFile.path.split('.').last.toLowerCase();
+    final ref = _storage.ref('chat_videos/$senderUid/$msgId.$ext');
+    await ref.putFile(videoFile, SettableMetadata(contentType: 'video/$ext'));
+    final videoUrl = await ref.getDownloadURL();
+
+    final msg = MessageModel(
+      id: msgId,
+      senderId: senderUid,
+      videoUrl: videoUrl,
+      type: MessageType.video,
+      timestamp: now,
+      replyToId: replyToId,
+      replyToText: replyToText,
+      replyToImageUrl: replyToImageUrl,
+      replyToSenderId: replyToSenderId,
+    );
+
+    await _db
+        .collection('chats')
+        .doc(id)
+        .collection('messages')
+        .doc(msgId)
+        .set(msg.toFirestore());
+
+    _updateChatMeta(id, {
+      'lastMessage': '🎥 Video',
       'lastSenderId': senderUid,
       'lastMessageTime': Timestamp.fromDate(now),
       'unread_$receiverUid': FieldValue.increment(1),
@@ -411,6 +455,9 @@ class ChatService {
     required String uid1,
     required String uid2,
     required String messageId,
+    String? audioUrl,
+    String? imageUrl,
+    String? videoUrl,
   }) async {
     final id = chatId(uid1, uid2);
     await _db
@@ -419,5 +466,11 @@ class ChatService {
         .collection('messages')
         .doc(messageId)
         .delete();
+    // Delete associated media from Storage so it isn't orphaned.
+    for (final url in [audioUrl, imageUrl, videoUrl]) {
+      if (url != null && url.isNotEmpty) {
+        try { await _storage.refFromURL(url).delete(); } catch (_) {}
+      }
+    }
   }
 }

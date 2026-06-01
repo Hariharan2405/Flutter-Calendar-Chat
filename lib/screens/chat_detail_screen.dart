@@ -5,6 +5,8 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:gal/gal.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:record/record.dart';
@@ -12,6 +14,8 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:video_compress/video_compress.dart';
+import 'package:video_player/video_player.dart';
 import '../services/chat_service.dart';
 import '../services/call_service.dart';
 import '../models/user_profile_model.dart';
@@ -19,6 +23,8 @@ import '../models/message_model.dart';
 import '../models/call_model.dart';
 import '../constants/app_theme.dart';
 import '../utils/snack_util.dart';
+import '../widgets/link_preview_widget.dart';
+import '../widgets/voice_message_player.dart';
 import '../widgets/voice_preview_sheet.dart';
 import '../widgets/gif_picker_sheet.dart';
 import '../widgets/sticker_picker_sheet.dart';
@@ -91,6 +97,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   bool _isSending = false;
   bool _showEmojiPicker = false;
   final ValueNotifier<String?> _playingNotifier = ValueNotifier(null);
+  final ValueNotifier<bool> _isPlayingNotifier = ValueNotifier(false);
+  final ValueNotifier<Duration> _positionNotifier = ValueNotifier(Duration.zero);
+  final ValueNotifier<Duration?> _durationNotifier = ValueNotifier(null);
   int? _prevMsgCount;
   List<MessageModel> _currentMessages = [];
   final Map<String, GlobalKey> _messageKeys = {};
@@ -103,7 +112,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   StreamSubscription<Map<String, dynamic>?>? _chatDataSub;
   UserProfileModel? _otherUserLive;
   StreamSubscription<UserProfileModel?>? _otherUserSub;
-  Timer? _lastSeenTimer;
 
   double _dragStartY = 0;
   bool _recordingStartedByDrag = false;
@@ -134,12 +142,19 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     _chatService.markRead(widget.currentUid, widget.otherUser.uid, widget.currentUid);
     _chatService.updateOnReturn(widget.currentUid);
 
-    _lastSeenTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      _chatService.updateOnReturn(widget.currentUid);
+    _player.onPositionChanged.listen((pos) {
+      _positionNotifier.value = pos;
     });
-
+    _player.onDurationChanged.listen((dur) {
+      _durationNotifier.value = dur;
+    });
     _player.onPlayerComplete.listen((_) {
-      if (mounted) _playingNotifier.value = null;
+      if (mounted) {
+        _playingNotifier.value = null;
+        _isPlayingNotifier.value = false;
+        _positionNotifier.value = Duration.zero;
+        _durationNotifier.value = null;
+      }
     });
     _textFocus.addListener(() {
       if (_textFocus.hasFocus && _showEmojiPicker) {
@@ -561,7 +576,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     if (msg.type == MessageType.sticker) {
       return _buildStickerBubble(msg, isMe);
     }
-    final isMedia = msg.type == MessageType.image || msg.type == MessageType.gif;
+    final isMedia = msg.type == MessageType.image ||
+        msg.type == MessageType.gif ||
+        msg.type == MessageType.video;
 
     return GestureDetector(
       onLongPress: () => _showMessageOptions(msg, isMe),
@@ -654,12 +671,22 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             ),
             const SizedBox(height: 6),
           ],
-          if (msg.type == MessageType.text)
-            Text(msg.text ?? '',
-                style: TextStyle(
-                    color: isMe ? Colors.white : AppColors.textPrimary,
-                    fontSize: 14))
-          else
+          if (msg.type == MessageType.text) ...[
+            LinkableText(
+              text: msg.text ?? '',
+              style: TextStyle(
+                  color: isMe ? Colors.white : AppColors.textPrimary,
+                  fontSize: 14,
+                  height: 1.4),
+            ),
+            // Show a link preview card for the first URL in the message
+            if (containsUrl(msg.text ?? ''))
+              LinkPreviewWidget(
+                key: ValueKey('lp_${msg.id}'),
+                url: extractFirstUrl(msg.text ?? '')!,
+                isMine: isMe,
+              ),
+          ] else
             _buildVoiceBubble(msg, isMe),
           const SizedBox(height: 3),
           Row(
@@ -693,6 +720,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   }
 
   Widget _buildMediaBubble(MessageModel msg, bool isMe) {
+    if (msg.type == MessageType.video) return _buildVideoBubble(msg, isMe);
     return Stack(
       children: [
         Column(
@@ -746,6 +774,52 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                Text(
+                  DateFormat('h:mm a').format(msg.timestamp),
+                  style: const TextStyle(fontSize: 10, color: Colors.white),
+                ),
+                if (isMe) ...[
+                  const SizedBox(width: 3),
+                  _buildTickIcon(msg),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildVideoBubble(MessageModel msg, bool isMe) {
+    return Stack(
+      children: [
+        GestureDetector(
+          onTap: () => _viewFullVideo(msg.videoUrl!),
+          child: Container(
+            height: 180,
+            width: double.infinity,
+            color: Colors.black87,
+            child: const Center(
+              child: Icon(Icons.play_circle_fill_rounded,
+                  color: Colors.white, size: 56),
+            ),
+          ),
+        ),
+        Positioned(
+          bottom: 6,
+          right: 8,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: Colors.black45,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.videocam_rounded,
+                    color: Colors.white70, size: 12),
+                const SizedBox(width: 4),
                 Text(
                   DateFormat('h:mm a').format(msg.timestamp),
                   style: const TextStyle(fontSize: 10, color: Colors.white),
@@ -829,66 +903,17 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   }
 
   Widget _buildVoiceBubble(MessageModel msg, bool isMe) {
-    final dur = msg.audioDurationSeconds ?? 0;
-
-    return ValueListenableBuilder<String?>(
-      valueListenable: _playingNotifier,
-      builder: (context, playingId, _) {
-        final isPlaying = playingId == msg.id;
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            GestureDetector(
-              onTap: () => _togglePlay(msg),
-              child: Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: isMe
-                      ? Colors.white.withValues(alpha: 0.2)
-                      : AppColors.primary.withValues(alpha: 0.1),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                  color: isMe ? Colors.white : AppColors.primary,
-                  size: 20,
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: List.generate(
-                      20,
-                      (i) => Container(
-                            width: 3,
-                            height: (4 + (i % 4) * 4).toDouble(),
-                            margin: const EdgeInsets.symmetric(horizontal: 1),
-                            decoration: BoxDecoration(
-                              color: isMe
-                                  ? Colors.white
-                                      .withValues(alpha: isPlaying ? 1.0 : 0.55)
-                                  : AppColors.primary
-                                      .withValues(alpha: isPlaying ? 1.0 : 0.4),
-                              borderRadius: BorderRadius.circular(2),
-                            ),
-                          )),
-                ),
-                const SizedBox(height: 2),
-                Text(_fmt(dur),
-                    style: TextStyle(
-                        fontSize: 10,
-                        color: isMe
-                            ? Colors.white.withValues(alpha: 0.8)
-                            : AppColors.textSecondary)),
-              ],
-            ),
-          ],
-        );
-      },
+    return VoiceMessagePlayer(
+      messageId: msg.id,
+      audioUrl: msg.audioUrl,
+      totalSeconds: msg.audioDurationSeconds ?? 0,
+      isMine: isMe,
+      playingIdNotifier: _playingNotifier,
+      isPlayingNotifier: _isPlayingNotifier,
+      positionNotifier: _positionNotifier,
+      durationNotifier: _durationNotifier,
+      onToggle: () => _togglePlay(msg),
+      onSeek: _seekAudio,
     );
   }
 
@@ -1226,6 +1251,22 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 decoration: BoxDecoration(
                     color: AppColors.primary.withValues(alpha: 0.1),
                     shape: BoxShape.circle),
+                child: const Icon(Icons.videocam_rounded,
+                    color: AppColors.primary, size: 22),
+              ),
+              title: const Text('Video'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickVideo();
+              },
+            ),
+            ListTile(
+              leading: Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                    color: AppColors.primary.withValues(alpha: 0.1),
+                    shape: BoxShape.circle),
                 child: const Icon(Icons.gif_rounded,
                     color: AppColors.primary, size: 26),
               ),
@@ -1272,6 +1313,31 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       type: MessageType.image,
       localFile: file,
+      replyToText: _replyToPreviewText(),
+      replyToId: _replyingTo?.id,
+      replyToImageUrl: _replyToImageUrl(),
+      replyToSenderId: _replyingTo?.senderId,
+    );
+    if (mounted) setState(() => _replyingTo = null);
+    await _enqueuePending(item);
+  }
+
+  Future<void> _pickVideo() async {
+    final XFile? file = await _imagePicker.pickVideo(source: ImageSource.gallery);
+    if (file == null || !mounted) return;
+
+    final compressed = await VideoCompress.compressVideo(
+      file.path,
+      quality: VideoQuality.MediumQuality,
+      deleteOrigin: false,
+      includeAudio: true,
+    );
+    if (compressed?.path == null || !mounted) return;
+
+    final item = _PendingItem(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      type: MessageType.video,
+      localFile: File(compressed!.path!),
       replyToText: _replyToPreviewText(),
       replyToId: _replyingTo?.id,
       replyToImageUrl: _replyToImageUrl(),
@@ -1401,9 +1467,18 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       );
     }
 
-    // Image / GIF pending bubble
+    // Image / Video / GIF pending bubble
     Widget content;
-    if (item.localFile != null) {
+    if (item.type == MessageType.video) {
+      content = Container(
+        height: 180,
+        width: double.infinity,
+        color: Colors.black87,
+        child: const Center(
+          child: Icon(Icons.videocam_rounded, color: Colors.white54, size: 48),
+        ),
+      );
+    } else if (item.localFile != null) {
       content = Image.file(item.localFile!,
           fit: BoxFit.cover, width: double.infinity);
     } else if (item.gifUrl != null) {
@@ -1540,6 +1615,16 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             replyToImageUrl: item.replyToImageUrl,
             replyToSenderId: item.replyToSenderId,
           );
+        case MessageType.video:
+          await _chatService.sendVideoMessage(
+            senderUid: widget.currentUid,
+            receiverUid: widget.otherUser.uid,
+            videoFile: item.localFile!,
+            replyToId: item.replyToId,
+            replyToText: item.replyToText,
+            replyToImageUrl: item.replyToImageUrl,
+            replyToSenderId: item.replyToSenderId,
+          );
         default:
           break;
       }
@@ -1572,24 +1657,37 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => Scaffold(
-          backgroundColor: Colors.black,
-          appBar: AppBar(
-            backgroundColor: Colors.transparent,
-            iconTheme: const IconThemeData(color: Colors.white),
-          ),
-          body: Center(
-            child: InteractiveViewer(
-              child: CachedNetworkImage(
-                imageUrl: url,
-                placeholder: (_, __) =>
-                    const Center(child: CircularProgressIndicator()),
-              ),
-            ),
-          ),
-        ),
+        builder: (_) => _FullScreenImageViewer(url: url),
       ),
     );
+  }
+
+  void _viewFullVideo(String url) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _FullScreenVideoViewer(url: url),
+      ),
+    );
+  }
+
+  Future<void> _saveToGallery(String url, {required bool isVideo}) async {
+    try {
+      final dir = await getTemporaryDirectory();
+      final ext = isVideo ? 'mp4' : 'jpg';
+      final path =
+          '${dir.path}/dl_${DateTime.now().millisecondsSinceEpoch}.$ext';
+      final resp = await http.get(Uri.parse(url));
+      await File(path).writeAsBytes(resp.bodyBytes);
+      if (isVideo) {
+        await Gal.putVideo(path);
+      } else {
+        await Gal.putImage(path);
+      }
+      if (mounted) context.showSuccess('Saved to gallery');
+    } catch (_) {
+      if (mounted) context.showError('Download failed');
+    }
   }
 
   // ── Message Options (long press) ──────────────────────────────────────────
@@ -1621,6 +1719,26 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 setState(() => _replyingTo = msg);
               },
             ),
+            if (msg.type == MessageType.image || msg.type == MessageType.gif)
+              ListTile(
+                leading: const Icon(Icons.download_rounded,
+                    color: AppColors.primary),
+                title: const Text('Save to Gallery'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _saveToGallery(msg.imageUrl!, isVideo: false);
+                },
+              ),
+            if (msg.type == MessageType.video)
+              ListTile(
+                leading: const Icon(Icons.download_rounded,
+                    color: AppColors.primary),
+                title: const Text('Save to Gallery'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _saveToGallery(msg.videoUrl!, isVideo: true);
+                },
+              ),
             if (isMe && msg.type == MessageType.text)
               ListTile(
                 leading: const Icon(Icons.edit_rounded,
@@ -1707,6 +1825,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 uid1: widget.currentUid,
                 uid2: widget.otherUser.uid,
                 messageId: msg.id,
+                audioUrl: msg.audioUrl,
+                imageUrl: msg.imageUrl,
+                videoUrl: msg.videoUrl,
               );
               if (ctx.mounted) Navigator.pop(ctx);
             },
@@ -1892,12 +2013,27 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
   Future<void> _togglePlay(MessageModel msg) async {
     if (_playingNotifier.value == msg.id) {
-      await _player.stop();
-      _playingNotifier.value = null;
+      // Same message — toggle between playing and paused
+      if (_isPlayingNotifier.value) {
+        await _player.pause();
+        _isPlayingNotifier.value = false;
+      } else {
+        await _player.resume();
+        _isPlayingNotifier.value = true;
+      }
     } else {
+      // Different message — reset position and start fresh
+      _positionNotifier.value = Duration.zero;
+      _durationNotifier.value = null;
       _playingNotifier.value = msg.id;
+      _isPlayingNotifier.value = true;
       await _player.play(UrlSource(msg.audioUrl!));
     }
+  }
+
+  Future<void> _seekAudio(Duration position) async {
+    await _player.seek(position);
+    _positionNotifier.value = position;
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1909,7 +2045,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
   bool get _isOtherOnline {
     final profile = _otherUserLive ?? widget.otherUser;
-    return DateTime.now().difference(profile.lastSeen).inMinutes < 2;
+    return DateTime.now().difference(profile.lastSeen).inSeconds < 60;
   }
 
   String get _onlineStatusText {
@@ -1966,9 +2102,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   @override
   void dispose() {
     ActiveChatTracker.activeChatId = null;
+    // Guarantee unread is 0 for the current user when leaving the chat,
+    // regardless of whether messages arrived during this session.
+    _chatService.markRead(widget.currentUid, widget.otherUser.uid, widget.currentUid).ignore();
     _chatDataSub?.cancel();
     _otherUserSub?.cancel();
-    _lastSeenTimer?.cancel();
+
     _textCtrl.dispose();
     _scrollCtrl.dispose();
     _textFocus.dispose();
@@ -1976,6 +2115,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     _recorder.dispose();
     _player.dispose();
     _playingNotifier.dispose();
+    _isPlayingNotifier.dispose();
+    _positionNotifier.dispose();
+    _durationNotifier.dispose();
     super.dispose();
   }
 }
@@ -2038,6 +2180,152 @@ class _SwipeToReplyState extends State<_SwipeToReply> {
             ),
         ],
       ),
+    );
+  }
+}
+
+// ── Full-screen image viewer with download ────────────────────────────────────
+
+class _FullScreenImageViewer extends StatelessWidget {
+  final String url;
+  const _FullScreenImageViewer({required this.url});
+
+  Future<void> _download(BuildContext ctx) async {
+    try {
+      final dir = await getTemporaryDirectory();
+      final path = '${dir.path}/img_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final resp = await http.get(Uri.parse(url));
+      await File(path).writeAsBytes(resp.bodyBytes);
+      await Gal.putImage(path);
+      if (ctx.mounted) ctx.showSuccess('Saved to gallery');
+    } catch (_) {
+      if (ctx.mounted) ctx.showError('Download failed');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        iconTheme: const IconThemeData(color: Colors.white),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.download_rounded),
+            tooltip: 'Save to gallery',
+            onPressed: () => _download(context),
+          ),
+        ],
+      ),
+      body: Center(
+        child: InteractiveViewer(
+          child: CachedNetworkImage(
+            imageUrl: url,
+            placeholder: (_, __) =>
+                const Center(child: CircularProgressIndicator()),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Full-screen video viewer with download ────────────────────────────────────
+
+class _FullScreenVideoViewer extends StatefulWidget {
+  final String url;
+  const _FullScreenVideoViewer({required this.url});
+
+  @override
+  State<_FullScreenVideoViewer> createState() => _FullScreenVideoViewerState();
+}
+
+class _FullScreenVideoViewerState extends State<_FullScreenVideoViewer> {
+  late VideoPlayerController _ctrl;
+  bool _ready = false;
+  bool _downloading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = VideoPlayerController.networkUrl(Uri.parse(widget.url))
+      ..initialize().then((_) {
+        if (mounted) {
+          setState(() => _ready = true);
+          _ctrl.play();
+        }
+      });
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _download() async {
+    if (_downloading) return;
+    setState(() => _downloading = true);
+    try {
+      final dir = await getTemporaryDirectory();
+      final path = '${dir.path}/vid_${DateTime.now().millisecondsSinceEpoch}.mp4';
+      final resp = await http.get(Uri.parse(widget.url));
+      await File(path).writeAsBytes(resp.bodyBytes);
+      await Gal.putVideo(path);
+      if (mounted) context.showSuccess('Saved to gallery');
+    } catch (_) {
+      if (mounted) context.showError('Download failed');
+    } finally {
+      if (mounted) setState(() => _downloading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        iconTheme: const IconThemeData(color: Colors.white),
+        actions: [
+          if (_downloading)
+            const Padding(
+              padding: EdgeInsets.all(14),
+              child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                      color: Colors.white, strokeWidth: 2)),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.download_rounded),
+              tooltip: 'Save to gallery',
+              onPressed: _download,
+            ),
+        ],
+      ),
+      body: Center(
+        child: _ready
+            ? AspectRatio(
+                aspectRatio: _ctrl.value.aspectRatio,
+                child: VideoPlayer(_ctrl),
+              )
+            : const CircularProgressIndicator(color: Colors.white),
+      ),
+      floatingActionButton: _ready
+          ? FloatingActionButton(
+              backgroundColor: Colors.white24,
+              onPressed: () => setState(() {
+                _ctrl.value.isPlaying ? _ctrl.pause() : _ctrl.play();
+              }),
+              child: Icon(
+                _ctrl.value.isPlaying ? Icons.pause : Icons.play_arrow,
+                color: Colors.white,
+              ),
+            )
+          : null,
     );
   }
 }

@@ -9,6 +9,7 @@ import '../utils/snack_util.dart';
 import '../widgets/calendar_widget.dart';
 import '../widgets/notes_section.dart';
 import '../widgets/expense_section.dart';
+import 'chat_list_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -215,7 +216,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             children: [
               CircularProgressIndicator(color: Colors.white),
               SizedBox(height: 16),
-              Text('Connecting to Firebase...', style: TextStyle(color: Colors.white, fontSize: 16)),
+              Text('Connecting to Calendar...', style: TextStyle(color: Colors.white, fontSize: 16)),
             ],
           ),
         ),
@@ -284,13 +285,15 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       );
     }
 
-    return Scaffold(
-      resizeToAvoidBottomInset: false,
-      backgroundColor: AppColors.background,
-      body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) => Column(
-          children: [
+    return PopScope(
+      canPop: !provider.isCallMinimized,
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
+        backgroundColor: AppColors.background,
+        body: SafeArea(
+          child: LayoutBuilder(
+            builder: (context, constraints) => Column(
+            children: [
             // ── Top half: Calendar ─────────────────────────────────────────
             SizedBox(
               height: constraints.maxHeight * 0.48,
@@ -429,6 +432,16 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           ],
         ),
         ),
+      ),
+      floatingActionButton: provider.showHomeChatButton
+          ? FloatingActionButton(
+              backgroundColor: AppColors.primary,
+              child: const Icon(Icons.chat_rounded, color: Colors.white),
+              onPressed: () {
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const ChatListScreen()));
+              },
+            )
+          : null,
       ),
     );
   }

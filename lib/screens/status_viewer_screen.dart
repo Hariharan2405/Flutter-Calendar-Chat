@@ -6,18 +6,23 @@ import 'package:intl/intl.dart';
 import 'package:video_player/video_player.dart';
 import '../constants/app_theme.dart';
 import '../models/status_model.dart';
+import '../services/chat_service.dart';
 import '../services/status_service.dart';
 
 class StatusViewerScreen extends StatefulWidget {
-  final List<UserStatuses> groups; // all user groups
+  final List<UserStatuses> groups;
   final int initialGroupIndex;
   final String currentUid;
+  final String currentUserName;
+  final ChatService chatService;
 
   const StatusViewerScreen({
     super.key,
     required this.groups,
     required this.initialGroupIndex,
     required this.currentUid,
+    required this.currentUserName,
+    required this.chatService,
   });
 
   @override
@@ -32,20 +37,49 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
   late AnimationController _progressCtrl;
   VideoPlayerController? _videoCtrl;
 
+  // Local mutable copy so delete immediately updates progress bars
+  late List<List<StatusModel>> _mutableStatuses;
+
   int _groupIdx = 0;
   int _statusIdx = 0;
   bool _paused = false;
   bool _mediaLoaded = false;
   bool _showViewers = false;
 
-  UserStatuses get _group => widget.groups[_groupIdx];
-  StatusModel get _status => _group.statuses[_statusIdx];
+  // Viewer-sheet name/photo cache
+  final Map<String, String> _viewerNames = {};
+  final Map<String, String?> _viewerPhotos = {};
+
+  // Brief sent-feedback toast
+  String? _feedbackText;
+  Timer? _feedbackTimer;
+  bool _loadingViewerNames = false;
+
+  // Reply / react
+  final TextEditingController _replyCtrl = TextEditingController();
+  bool _showReplyInput = false;
+  bool _sendingReply = false;
+
+  UserStatuses get _groupInfo => widget.groups[_groupIdx];
+  List<StatusModel> get _currentStatuses => _mutableStatuses[_groupIdx];
+  StatusModel get _status => _currentStatuses[_statusIdx];
   bool get _isOwn => _status.uid == widget.currentUid;
 
   @override
   void initState() {
     super.initState();
     _groupIdx = widget.initialGroupIndex;
+    _mutableStatuses = widget.groups
+        .map((g) => List<StatusModel>.from(g.statuses))
+        .toList();
+
+    // Jump to the first unseen status in the initial group.
+    // If all are seen, start at 0 (show all from the beginning).
+    final initStatuses = _mutableStatuses[_groupIdx];
+    final firstUnseen = initStatuses.indexWhere(
+        (s) => !s.hasViewedBy(widget.currentUid));
+    _statusIdx = firstUnseen >= 0 ? firstUnseen : 0;
+
     _progressCtrl = AnimationController(vsync: this);
     _progressCtrl.addStatusListener((s) {
       if (s == AnimationStatus.completed) _advance();
@@ -58,15 +92,17 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
     _progressCtrl.dispose();
     _videoCtrl?.dispose();
     _musicPlayer.dispose();
+    _replyCtrl.dispose();
+    _feedbackTimer?.cancel();
     super.dispose();
   }
 
-  // ── Navigation ────────────────────────────────────────────────────────────────
+  // ── Navigation ─────────────────────────────────────────────────────────────
 
   void _advance() {
-    if (_statusIdx < _group.statuses.length - 1) {
+    if (_statusIdx < _currentStatuses.length - 1) {
       _loadStatusAt(_groupIdx, _statusIdx + 1);
-    } else if (_groupIdx < widget.groups.length - 1) {
+    } else if (_groupIdx < _mutableStatuses.length - 1) {
       _loadStatusAt(_groupIdx + 1, 0);
     } else {
       Navigator.pop(context);
@@ -77,17 +113,18 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
     if (_statusIdx > 0) {
       _loadStatusAt(_groupIdx, _statusIdx - 1);
     } else if (_groupIdx > 0) {
-      final prevGroup = widget.groups[_groupIdx - 1];
-      _loadStatusAt(_groupIdx - 1, prevGroup.statuses.length - 1);
+      _loadStatusAt(_groupIdx - 1, _mutableStatuses[_groupIdx - 1].length - 1);
     }
   }
 
   void _loadStatusAt(int gIdx, int sIdx) {
+    _replyCtrl.clear();
     setState(() {
       _groupIdx = gIdx;
       _statusIdx = sIdx;
       _mediaLoaded = false;
       _showViewers = false;
+      _showReplyInput = false;
     });
     _loadStatus();
   }
@@ -102,7 +139,6 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
 
     final s = _status;
 
-    // Mark viewed (not for own statuses)
     if (!_isOwn) {
       _statusService.markViewed(s.id, widget.currentUid);
     }
@@ -119,12 +155,26 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
       ctrl.play();
     } else {
       setState(() => _mediaLoaded = true);
-      _progressCtrl.duration = const Duration(seconds: 5);
       if (s.musicUrl != null) {
-        _musicPlayer.play(UrlSource(s.musicUrl!));
+        await _musicPlayer.play(UrlSource(s.musicUrl!));
+        final startMs = s.musicStartMs ?? 0;
+        Duration trackDur = const Duration(seconds: 30);
+        try {
+          trackDur = await _musicPlayer.onDurationChanged.first
+              .timeout(const Duration(seconds: 5));
+        } catch (_) {}
+        if (startMs > 0) {
+          await _musicPlayer.seek(Duration(milliseconds: startMs));
+        }
+        final remaining = trackDur - Duration(milliseconds: startMs);
+        _progressCtrl.duration =
+            remaining > Duration.zero ? remaining : const Duration(seconds: 30);
+      } else {
+        _progressCtrl.duration = const Duration(seconds: 5);
       }
     }
 
+    if (!mounted) return;
     if (!_paused) _progressCtrl.forward();
   }
 
@@ -141,7 +191,31 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
     }
   }
 
-  // ── Delete ────────────────────────────────────────────────────────────────────
+  // ── Viewers sheet ──────────────────────────────────────────────────────────
+
+  void _toggleViewers() {
+    setState(() => _showViewers = !_showViewers);
+    if (_showViewers && !_paused) _togglePause();
+    if (_showViewers) _loadViewerNames();
+  }
+
+  Future<void> _loadViewerNames() async {
+    if (_loadingViewerNames) return;
+    setState(() => _loadingViewerNames = true);
+    for (final uid in _status.viewers.keys) {
+      if (_viewerNames.containsKey(uid)) continue;
+      try {
+        final profile = await widget.chatService.getUserProfile(uid);
+        if (mounted) {
+          _viewerNames[uid] = profile?.name ?? uid;
+          _viewerPhotos[uid] = profile?.photoUrl;
+        }
+      } catch (_) {}
+    }
+    if (mounted) setState(() => _loadingViewerNames = false);
+  }
+
+  // ── Delete ─────────────────────────────────────────────────────────────────
 
   void _confirmDelete() {
     showDialog(
@@ -155,16 +229,25 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
               onPressed: () => Navigator.pop(ctx),
               child: const Text('Cancel')),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.holiday),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.holiday),
             onPressed: () async {
               Navigator.pop(ctx);
-              await _statusService.deleteStatus(_status.id);
+              final id = _status.id;
+              await _statusService.deleteStatus(id);
               if (!mounted) return;
-              if (_group.statuses.length == 1) {
+              final list = _mutableStatuses[_groupIdx];
+              list.removeAt(_statusIdx);
+              if (list.isEmpty) {
                 Navigator.pop(context);
               } else {
-                _advance();
+                final newIdx =
+                    _statusIdx >= list.length ? list.length - 1 : _statusIdx;
+                setState(() {
+                  _statusIdx = newIdx;
+                  _mediaLoaded = false;
+                  _showViewers = false;
+                });
+                _loadStatus();
               }
             },
             child: const Text('Delete'),
@@ -174,33 +257,123 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
     );
   }
 
-  // ── Build ─────────────────────────────────────────────────────────────────────
+  // ── Full profile photo ─────────────────────────────────────────────────────
+
+  void _viewFullPhoto(String url) {
+    if (!_paused) _togglePause();
+    showDialog(
+      context: context,
+      barrierColor: Colors.black87,
+      builder: (ctx) => GestureDetector(
+        onTap: () => Navigator.pop(ctx),
+        child: Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: EdgeInsets.zero,
+          child: InteractiveViewer(
+            child: CachedNetworkImage(imageUrl: url),
+          ),
+        ),
+      ),
+    ).then((_) {
+      if (mounted && _paused) _togglePause();
+    });
+  }
+
+  // ── React / reply ──────────────────────────────────────────────────────────
+
+  Future<void> _sendReply(String text) async {
+    if (text.trim().isEmpty || _sendingReply) return;
+    setState(() => _sendingReply = true);
+    try {
+      await widget.chatService.sendTextMessage(
+        senderUid: widget.currentUid,
+        receiverUid: _status.uid,
+        text: text.trim(),
+        replyToId: _status.id,
+        replyToText: _status.caption?.isNotEmpty == true
+            ? _status.caption
+            : '📷 Status',
+        replyToImageUrl:
+            _status.type == 'photo' ? _status.mediaUrl : null,
+        replyToSenderId: _status.uid,
+      );
+    } catch (_) {}
+    if (mounted) {
+      _replyCtrl.clear();
+      // Determine feedback label: emoji reactions show the emoji, longer text shows "Message sent"
+      final isEmoji = text.trim().runes.length == 1;
+      final label = isEmoji ? '${text.trim()} Sent' : 'Message sent';
+      setState(() {
+        _sendingReply = false;
+        _showReplyInput = false;
+        _feedbackText = label;
+      });
+      // Auto-dismiss after 2 seconds
+      _feedbackTimer?.cancel();
+      _feedbackTimer = Timer(const Duration(milliseconds: 1800), () {
+        if (mounted) setState(() => _feedbackText = null);
+      });
+      // Resume status after sending
+      if (_paused && !_showViewers) _togglePause();
+    }
+  }
+
+  // ── Build ──────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      resizeToAvoidBottomInset: true,
       backgroundColor: Colors.black,
       body: GestureDetector(
-        onLongPressStart: (_) => _togglePause(),
-        onLongPressEnd: (_) { if (_paused) _togglePause(); },
+        onLongPressStart: (_) {
+          if (!_showReplyInput) _togglePause();
+        },
+        onLongPressEnd: (_) {
+          if (_paused && !_showReplyInput) _togglePause();
+        },
         onVerticalDragEnd: (d) {
           if ((d.primaryVelocity ?? 0) > 300) Navigator.pop(context);
         },
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Media
             _buildMedia(),
-            // Dark gradient top/bottom
             _buildGradient(),
-            // Top bar
-            Positioned(top: 0, left: 0, right: 0, child: _buildTopBar()),
-            // Bottom bar
-            Positioned(bottom: 0, left: 0, right: 0, child: _buildBottomBar()),
-            // Tap areas
             _buildTapAreas(),
-            // Viewer list sheet
+            Positioned(top: 0, left: 0, right: 0, child: _buildTopBar()),
+            Positioned(bottom: 0, left: 0, right: 0, child: _buildBottomBar()),
             if (_showViewers && _isOwn) _buildViewerSheet(),
+            // Sent-feedback toast
+            if (_feedbackText != null)
+              Center(
+                child: AnimatedOpacity(
+                  opacity: _feedbackText != null ? 1.0 : 0.0,
+                  duration: const Duration(milliseconds: 220),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.72),
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.check_circle_rounded,
+                            color: Colors.white, size: 18),
+                        const SizedBox(width: 8),
+                        Text(
+                          _feedbackText!,
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
@@ -210,7 +383,8 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
   Widget _buildMedia() {
     if (_status.isVideo) {
       if (!_mediaLoaded || _videoCtrl == null) {
-        return const Center(child: CircularProgressIndicator(color: Colors.white));
+        return const Center(
+            child: CircularProgressIndicator(color: Colors.white));
       }
       return Center(
         child: AspectRatio(
@@ -224,8 +398,8 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
       fit: BoxFit.contain,
       placeholder: (_, __) =>
           const Center(child: CircularProgressIndicator(color: Colors.white)),
-      errorWidget: (_, __, ___) =>
-          const Center(child: Icon(Icons.broken_image_outlined,
+      errorWidget: (_, __, ___) => const Center(
+          child: Icon(Icons.broken_image_outlined,
               color: Colors.white54, size: 48)),
       imageBuilder: (ctx, img) {
         if (!_mediaLoaded) {
@@ -253,12 +427,12 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
         ),
         const Spacer(),
         Container(
-          height: 160,
+          height: 200,
           decoration: BoxDecoration(
             gradient: LinearGradient(
               begin: Alignment.bottomCenter,
               end: Alignment.topCenter,
-              colors: [Colors.black.withValues(alpha: 0.7), Colors.transparent],
+              colors: [Colors.black.withValues(alpha: 0.75), Colors.transparent],
             ),
           ),
         ),
@@ -276,7 +450,7 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
           children: [
             // Progress bars
             Row(
-              children: List.generate(_group.statuses.length, (i) {
+              children: List.generate(_currentStatuses.length, (i) {
                 return Expanded(
                   child: Container(
                     height: 2.5,
@@ -291,8 +465,8 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
                                   builder: (_, __) => LinearProgressIndicator(
                                     value: _progressCtrl.value,
                                     backgroundColor: Colors.white38,
-                                    valueColor:
-                                        const AlwaysStoppedAnimation(Colors.white),
+                                    valueColor: const AlwaysStoppedAnimation(
+                                        Colors.white),
                                     minHeight: 2.5,
                                   ),
                                 )
@@ -303,33 +477,38 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
               }),
             ),
             const SizedBox(height: 10),
-            // User info row
             Row(
               children: [
-                CircleAvatar(
-                  radius: 18,
-                  backgroundColor: AppColors.primary,
-                  backgroundImage: _group.photoUrl != null
-                      ? CachedNetworkImageProvider(_group.photoUrl!)
+                // Avatar — tap to view full profile photo
+                GestureDetector(
+                  onTap: _groupInfo.photoUrl != null
+                      ? () => _viewFullPhoto(_groupInfo.photoUrl!)
                       : null,
-                  child: _group.photoUrl == null
-                      ? Text(
-                          _group.name.isNotEmpty
-                              ? _group.name[0].toUpperCase()
-                              : '?',
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 14),
-                        )
-                      : null,
+                  child: CircleAvatar(
+                    radius: 18,
+                    backgroundColor: AppColors.primary,
+                    backgroundImage: _groupInfo.photoUrl != null
+                        ? CachedNetworkImageProvider(_groupInfo.photoUrl!)
+                        : null,
+                    child: _groupInfo.photoUrl == null
+                        ? Text(
+                            _groupInfo.name.isNotEmpty
+                                ? _groupInfo.name[0].toUpperCase()
+                                : '?',
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14),
+                          )
+                        : null,
+                  ),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(_group.name,
+                      Text(_groupInfo.name,
                           style: const TextStyle(
                               color: Colors.white,
                               fontWeight: FontWeight.w700,
@@ -345,7 +524,7 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
                 if (_isOwn)
                   IconButton(
                     icon: const Icon(Icons.delete_outline_rounded,
-                        color: Colors.white70, size: 22),
+                        color: Colors.white, size: 24),
                     onPressed: _confirmDelete,
                   ),
                 IconButton(
@@ -364,7 +543,7 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
     return SafeArea(
       top: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -378,42 +557,42 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
                   style: const TextStyle(
                       color: Colors.white,
                       fontSize: 15,
-                      shadows: [
-                        Shadow(color: Colors.black54, blurRadius: 4)
-                      ]),
+                      shadows: [Shadow(color: Colors.black54, blurRadius: 4)]),
                 ),
               ),
-            // Music info
+            // Music chip
             if (_status.hasMusic)
-              Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(
-                  color: Colors.black45,
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.music_note_rounded,
-                        color: Colors.white70, size: 14),
-                    const SizedBox(width: 6),
-                    Flexible(
-                      child: Text(
-                        '${_status.musicName ?? ''} — ${_status.musicArtist ?? ''}',
-                        style: const TextStyle(
-                            color: Colors.white70, fontSize: 12),
-                        overflow: TextOverflow.ellipsis,
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.black45,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.music_note_rounded,
+                          color: Colors.white70, size: 14),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          '${_status.musicName ?? ''} — ${_status.musicArtist ?? ''}',
+                          style: const TextStyle(
+                              color: Colors.white70, fontSize: 12),
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
-            // Viewer count (for own statuses)
+            // Own: view count
             if (_isOwn) ...[
-              const SizedBox(height: 8),
               GestureDetector(
-                onTap: () => setState(() => _showViewers = !_showViewers),
+                onTap: _toggleViewers,
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -437,6 +616,96 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
                 ),
               ),
             ],
+            // Others: emoji reactions + reply input
+            if (!_isOwn) ...[
+              const SizedBox(height: 4),
+              // Quick emoji reactions
+              if (!_showReplyInput)
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: ['❤️', '😂', '😮', '😢', '👏', '🔥']
+                      .map((e) => GestureDetector(
+                            onTap: () => _sendReply(e),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.35),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Text(e,
+                                  style: const TextStyle(fontSize: 22)),
+                            ),
+                          ))
+                      .toList(),
+                ),
+              const SizedBox(height: 8),
+              // Text reply row
+              Row(
+                children: [
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () {
+                        if (!_paused) _togglePause();
+                        setState(() => _showReplyInput = true);
+                      },
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(22),
+                          border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.4)),
+                        ),
+                        child: _showReplyInput
+                            ? TextField(
+                                controller: _replyCtrl,
+                                autofocus: true,
+                                style: const TextStyle(
+                                    color: Colors.white, fontSize: 14),
+                                decoration: const InputDecoration(
+                                  hintText: 'Send a message…',
+                                  hintStyle:
+                                      TextStyle(color: Colors.white60),
+                                  border: InputBorder.none,
+                                  contentPadding: EdgeInsets.symmetric(
+                                      horizontal: 16, vertical: 12),
+                                ),
+                                onSubmitted: (v) => _sendReply(v),
+                              )
+                            : const Center(
+                                child: Text('Send a message…',
+                                    style: TextStyle(
+                                        color: Colors.white60,
+                                        fontSize: 14)),
+                              ),
+                      ),
+                    ),
+                  ),
+                  if (_showReplyInput) ...[
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: () => _sendReply(_replyCtrl.text),
+                      child: Container(
+                        width: 44,
+                        height: 44,
+                        decoration: const BoxDecoration(
+                            color: AppColors.primary, shape: BoxShape.circle),
+                        child: _sendingReply
+                            ? const Padding(
+                                padding: EdgeInsets.all(10),
+                                child: CircularProgressIndicator(
+                                    color: Colors.white, strokeWidth: 2),
+                              )
+                            : const Icon(Icons.send_rounded,
+                                color: Colors.white, size: 20),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ],
           ],
         ),
       ),
@@ -446,17 +715,15 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
   Widget _buildTapAreas() {
     return Row(
       children: [
-        // Left: go back
         Expanded(
           child: GestureDetector(
-            onTap: _goBack,
+            onTap: _showReplyInput ? null : _goBack,
             behavior: HitTestBehavior.translucent,
           ),
         ),
-        // Right: go forward
         Expanded(
           child: GestureDetector(
-            onTap: _advance,
+            onTap: _showReplyInput ? null : _advance,
             behavior: HitTestBehavior.translucent,
           ),
         ),
@@ -476,7 +743,7 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
         onTap: () {},
         child: Container(
           constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.4,
+            maxHeight: MediaQuery.of(context).size.height * 0.45,
           ),
           decoration: const BoxDecoration(
             color: Color(0xFF1A1A1A),
@@ -500,11 +767,20 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
                     const Icon(Icons.remove_red_eye_outlined,
                         color: Colors.white70, size: 18),
                     const SizedBox(width: 8),
-                    Text('${viewers.length} viewer${viewers.length != 1 ? 's' : ''}',
+                    Text(
+                        '${viewers.length} viewer${viewers.length != 1 ? 's' : ''}',
                         style: const TextStyle(
                             color: Colors.white,
                             fontWeight: FontWeight.w700,
                             fontSize: 15)),
+                    if (_loadingViewerNames) ...[
+                      const SizedBox(width: 10),
+                      const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                              color: Colors.white54, strokeWidth: 1.5)),
+                    ],
                   ],
                 ),
               ),
@@ -522,20 +798,34 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
                     itemBuilder: (ctx, i) {
                       final uid = viewers[i].key;
                       final viewedAt = viewers[i].value;
+                      final name = _viewerNames[uid] ?? uid;
+                      final photo = _viewerPhotos[uid];
                       return ListTile(
                         leading: CircleAvatar(
                           radius: 18,
-                          backgroundColor: AppColors.primary.withValues(alpha: 0.3),
-                          child: Text(
-                            uid.isNotEmpty ? uid[0].toUpperCase() : '?',
-                            style: const TextStyle(color: Colors.white),
-                          ),
+                          backgroundColor:
+                              AppColors.primary.withValues(alpha: 0.5),
+                          backgroundImage: photo != null
+                              ? CachedNetworkImageProvider(photo)
+                              : null,
+                          child: photo == null
+                              ? Text(
+                                  name.isNotEmpty
+                                      ? name[0].toUpperCase()
+                                      : '?',
+                                  style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.bold))
+                              : null,
                         ),
-                        title: Text(uid,
-                            style: const TextStyle(color: Colors.white, fontSize: 14)),
+                        title: Text(name,
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 14)),
                         subtitle: Text(
                           DateFormat('h:mm a, d MMM').format(viewedAt),
-                          style: const TextStyle(color: Colors.white54, fontSize: 12),
+                          style: const TextStyle(
+                              color: Colors.white54, fontSize: 12),
                         ),
                       );
                     },

@@ -7,14 +7,19 @@ import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../models/group_model.dart';
 import '../providers/app_provider.dart';
 import '../services/chat_service.dart';
+import '../services/group_chat_service.dart';
 import '../services/status_service.dart';
 import '../models/user_profile_model.dart';
 import '../models/status_model.dart';
 import '../constants/app_theme.dart';
 import '../utils/snack_util.dart';
 import 'chat_detail_screen.dart';
+import 'create_group_screen.dart';
+import 'group_chat_screen.dart';
+import 'profile_photo_crop_screen.dart';
 import 'status_screen.dart';
 import 'status_viewer_screen.dart';
 
@@ -27,6 +32,7 @@ class ChatListScreen extends StatefulWidget {
 
 class _ChatListScreenState extends State<ChatListScreen> {
   final ChatService _chatService = ChatService();
+  final GroupChatService _groupService = GroupChatService();
   final StatusService _statusService = StatusService();
   bool _checkingProfile = true;
   String? _currentUserName;
@@ -106,14 +112,20 @@ class _ChatListScreenState extends State<ChatListScreen> {
   }
 
   Future<void> _pickProfilePhoto() async {
-    final file = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 85);
-    if (file == null || !mounted) return;
+    final picked = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 95);
+    if (picked == null || !mounted) return;
+
+    // Let the user position and zoom before uploading
+    final cropped = await ProfilePhotoCropScreen.push(context, File(picked.path));
+    if (cropped == null || !mounted) return;
+
     final uid = context.read<AppProvider>().chatUserId;
     setState(() => _uploadingPhoto = true);
     try {
-      final url = await _chatService.uploadProfilePhoto(uid, File(file.path));
+      final url = await _chatService.uploadProfilePhoto(uid, cropped);
       await _chatService.updatePhotoUrl(uid, url);
       if (mounted) {
+        context.read<AppProvider>().updateProfilePhoto(url);
         setState(() => _currentUserPhotoUrl = url);
         context.showSuccess('Profile photo updated');
       }
@@ -145,9 +157,13 @@ class _ChatListScreenState extends State<ChatListScreen> {
             icon: const Icon(Icons.more_vert, color: Colors.white),
             onSelected: (v) {
               if (v == 'trigger') _changeTriggerWord();
+              if (v == 'toggle_home_button') {
+                final provider = context.read<AppProvider>();
+                provider.toggleHomeChatButton(!provider.showHomeChatButton);
+              }
             },
-            itemBuilder: (_) => const [
-              PopupMenuItem(
+            itemBuilder: (_) => [
+              const PopupMenuItem(
                 value: 'trigger',
                 child: Row(
                   children: [
@@ -155,6 +171,27 @@ class _ChatListScreenState extends State<ChatListScreen> {
                     SizedBox(width: 10),
                     Text('Chat shortcut keyword'),
                   ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'toggle_home_button',
+                child: Consumer<AppProvider>(
+                  builder: (context, provider, _) => Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.add_to_home_screen_rounded, size: 20),
+                      const SizedBox(width: 10),
+                      const Text('Home chat button'),
+                      const SizedBox(width: 8),
+                      IgnorePointer(
+                        child: Switch(
+                          value: provider.showHomeChatButton,
+                          onChanged: (_) {},
+                          activeColor: AppColors.primary,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -212,6 +249,15 @@ class _ChatListScreenState extends State<ChatListScreen> {
             ),
         ],
       ),
+      floatingActionButton: FloatingActionButton(
+        backgroundColor: AppColors.primary,
+        tooltip: 'New group',
+        onPressed: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const CreateGroupScreen()),
+        ),
+        child: const Icon(Icons.group_add_rounded, color: Colors.white),
+      ),
       body: _checkingProfile
           ? const Center(child: CircularProgressIndicator())
           : StreamBuilder<List<StatusModel>>(
@@ -225,27 +271,72 @@ class _ChatListScreenState extends State<ChatListScreen> {
                       return const Center(child: CircularProgressIndicator());
                     }
                     final users = snap.data ?? [];
-                    if (users.isEmpty) return _buildEmpty();
 
-                    // Build status groups so we can look up rings per user
                     final statusGroups = StatusService.groupByUser(
                       statuses: allStatuses,
                       users: users,
                       currentUid: uid,
                     );
-                    final groupMap = {
-                      for (final g in statusGroups) g.uid: g
-                    };
+                    final groupMap = {for (final g in statusGroups) g.uid: g};
 
-                    return ListView.builder(
-                      padding: const EdgeInsets.all(12),
-                      itemCount: users.length,
-                      itemBuilder: (ctx, i) => _UserTile(
-                        user: users[i],
-                        currentUid: uid,
-                        chatService: _chatService,
-                        statusGroup: groupMap[users[i].uid],
-                      ),
+                    return CustomScrollView(
+                      slivers: [
+                        // ── Groups section ─────────────────────────────
+                        SliverToBoxAdapter(
+                          child: StreamBuilder<List<GroupModel>>(
+                            stream: _groupService.getAllGroupsFor(uid),
+                            builder: (ctx, groupSnap) {
+                              final groups = groupSnap.data ?? [];
+                              if (groups.isEmpty) return const SizedBox.shrink();
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Padding(
+                                    padding: EdgeInsets.fromLTRB(16, 14, 16, 6),
+                                    child: Text('GROUPS',
+                                        style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                            color: AppColors.textSecondary,
+                                            letterSpacing: 1)),
+                                  ),
+                                  ...groups.map((g) => _GroupTile(
+                                        group: g,
+                                        currentUid: uid,
+                                      )),
+                                  const Padding(
+                                    padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
+                                    child: Text('PEOPLE',
+                                        style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                            color: AppColors.textSecondary,
+                                            letterSpacing: 1)),
+                                  ),
+                                ],
+                              );
+                            },
+                          ),
+                        ),
+                        // ── Users section ──────────────────────────────
+                        if (users.isEmpty)
+                          SliverFillRemaining(child: _buildEmpty())
+                        else
+                          SliverPadding(
+                            padding: const EdgeInsets.fromLTRB(12, 0, 12, 80),
+                            sliver: SliverList(
+                              delegate: SliverChildBuilderDelegate(
+                                (ctx, i) => _UserTile(
+                                  user: users[i],
+                                  currentUid: uid,
+                                  chatService: _chatService,
+                                  statusGroup: groupMap[users[i].uid],
+                                ),
+                                childCount: users.length,
+                              ),
+                            ),
+                          ),
+                      ],
                     );
                   },
                 );
@@ -342,6 +433,7 @@ class _UserTileState extends State<_UserTile> {
   void _openStatus(BuildContext context) {
     final group = widget.statusGroup;
     if (group == null) return;
+    final provider = context.read<AppProvider>();
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -349,6 +441,8 @@ class _UserTileState extends State<_UserTile> {
           groups: [group],
           initialGroupIndex: 0,
           currentUid: widget.currentUid,
+          currentUserName: provider.profile?.name ?? '',
+          chatService: widget.chatService,
         ),
       ),
     );
@@ -361,7 +455,7 @@ class _UserTileState extends State<_UserTile> {
       initialData: widget.user,
       builder: (ctx, profileSnap) {
         final profile = profileSnap.data ?? widget.user;
-        final isOnline = DateTime.now().difference(profile.lastSeen).inMinutes < 2;
+        final isOnline = DateTime.now().difference(profile.lastSeen).inSeconds < 60;
 
         return StreamBuilder<Map<String, dynamic>?>(
           stream: _chatStream,
@@ -378,7 +472,7 @@ class _UserTileState extends State<_UserTile> {
               final dt = (lastTime as Timestamp).toDate();
               final now = DateTime.now();
               timeStr = (dt.year == now.year && dt.month == now.month && dt.day == now.day)
-                  ? DateFormat('HH:mm').format(dt)
+                  ? DateFormat('h:mm a').format(dt)
                   : DateFormat('d MMM').format(dt);
             }
 
@@ -399,6 +493,11 @@ class _UserTileState extends State<_UserTile> {
                       : profile.photoUrl != null
                           ? () => _openFullScreenPhoto(context, profile.photoUrl!)
                           : null,
+                  // Long-press always opens the full profile photo,
+                  // even when the user has a status ring.
+                  onLongPress: profile.photoUrl != null
+                      ? () => _openFullScreenPhoto(context, profile.photoUrl!)
+                      : null,
                   child: _StatusRingWrapper(
                     hasStatus: widget.statusGroup != null,
                     allViewed: widget.statusGroup?.allViewedBy(widget.currentUid) ?? false,
@@ -519,6 +618,112 @@ class _UserTileState extends State<_UserTile> {
           },
         );
       },
+    );
+  }
+}
+
+// ── Group tile ────────────────────────────────────────────────────────────────
+
+class _GroupTile extends StatelessWidget {
+  final GroupModel group;
+  final String currentUid;
+
+  const _GroupTile({required this.group, required this.currentUid});
+
+  @override
+  Widget build(BuildContext context) {
+    final unread = group.unreadFor(currentUid);
+    final lastTime = group.lastMessageTime;
+    String timeStr = '';
+    if (lastTime != null) {
+      final now = DateTime.now();
+      timeStr = (lastTime.year == now.year &&
+              lastTime.month == now.month &&
+              lastTime.day == now.day)
+          ? DateFormat('h:mm a').format(lastTime)
+          : DateFormat('d MMM').format(lastTime);
+    }
+
+    String preview = '';
+    if (group.lastMessage.isNotEmpty) {
+      final isMine = group.lastSenderId == currentUid;
+      final sender = isMine ? 'You' : group.lastSenderName;
+      preview = sender.isNotEmpty ? '$sender: ${group.lastMessage}' : group.lastMessage;
+    }
+
+    return Card(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        leading: CircleAvatar(
+          radius: 24,
+          backgroundColor: AppColors.primary.withValues(alpha: 0.15),
+          backgroundImage: group.iconUrl != null
+              ? CachedNetworkImageProvider(group.iconUrl!) : null,
+          child: group.iconUrl == null
+              ? const Icon(Icons.group_rounded, color: AppColors.primary, size: 26)
+              : null,
+        ),
+        title: Text(group.name,
+            style: TextStyle(
+                fontWeight: unread > 0 ? FontWeight.w800 : FontWeight.w600,
+                color: AppColors.textPrimary)),
+        subtitle: preview.isNotEmpty
+            ? Text(preview,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: 12,
+                    color: unread > 0 ? AppColors.textPrimary : AppColors.textSecondary,
+                    fontWeight: unread > 0 ? FontWeight.w600 : FontWeight.normal))
+            : Text('${group.participants.length} members',
+                style: const TextStyle(
+                    fontSize: 12, color: AppColors.textSecondary,
+                    fontStyle: FontStyle.italic)),
+        trailing: SizedBox(
+          width: 60,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              if (timeStr.isNotEmpty)
+                Text(timeStr,
+                    style: TextStyle(
+                        fontSize: 11,
+                        color: unread > 0
+                            ? const Color(0xFF25D366) : AppColors.textSecondary,
+                        fontWeight: unread > 0 ? FontWeight.w600 : FontWeight.normal)),
+              if (unread > 0) ...[
+                if (timeStr.isNotEmpty) const SizedBox(height: 4),
+                Container(
+                  padding: const EdgeInsets.all(2),
+                  decoration: const BoxDecoration(
+                      color: Color(0xFF25D366), shape: BoxShape.circle),
+                  constraints: const BoxConstraints(minWidth: 20, minHeight: 20),
+                  child: Center(
+                    child: Text(unread > 99 ? '99+' : '$unread',
+                        style: const TextStyle(
+                            color: Colors.white, fontSize: 11,
+                            fontWeight: FontWeight.bold)),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => GroupChatScreen(
+              groupId: group.id,
+              currentUid: currentUid,
+              initialName: group.name,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

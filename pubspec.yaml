@@ -1,7 +1,7 @@
 name: calendar_app
 description: Calendar with Tamil Nadu Holidays, Notes and Expense Tracker
 publish_to: 'none'
-version: 1.0.2+1
+version: 1.0.4+2
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -59,8 +59,15 @@ dependencies:
   video_player: ^2.9.2
   file_picker: ^8.1.4
 
+  # Video compression & gallery save
+  video_compress: ^3.1.2
+  gal: ^1.2.0
+
   # Keep screen on during calls
   wakelock_plus: ^1.0.0
+
+  # Link previews
+  url_launcher: ^6.3.1
 
   # UI
   cupertino_icons: ^1.0.8
