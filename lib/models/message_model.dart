@@ -76,7 +76,11 @@ class MessageModel {
       replyToSenderId: data['replyToSenderId'],
       replyToSenderName: data['replyToSenderName'] as String?,
       type: type,
-      timestamp: (data['timestamp'] as Timestamp).toDate(),
+      // timestamp may be null briefly (Firestore pending-write state) before
+      // the server confirms FieldValue.serverTimestamp().
+      timestamp: data['timestamp'] != null
+          ? (data['timestamp'] as Timestamp).toDate()
+          : DateTime.now(),
       isEdited: data['isEdited'] ?? false,
     );
   }
@@ -116,8 +120,13 @@ class MessageModel {
       if (replyToSenderName != null) 'replyToSenderName': replyToSenderName,
       if (senderName != null) 'senderName': senderName,
       'type': typeStr,
-      'timestamp': Timestamp.fromDate(timestamp),
-      'expireAt': Timestamp.fromDate(timestamp.add(const Duration(days: 3))),
+      // Server timestamp: Firestore stamps this at the moment the write is
+      // committed on the server, AFTER any Storage upload completes.
+      // This guarantees correct ordering even when uploads take many seconds,
+      // and eliminates client-clock drift for all message types.
+      'timestamp': FieldValue.serverTimestamp(),
+      // expireAt: keep using local DateTime so the 2-day window is exact.
+      'expireAt': Timestamp.fromDate(DateTime.now().add(const Duration(days: 2))),
       'isEdited': isEdited,
     };
   }

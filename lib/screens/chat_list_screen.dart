@@ -43,6 +43,8 @@ class _ChatListScreenState extends State<ChatListScreen> {
   void initState() {
     super.initState();
     ChatListTracker.isActive = true;
+    // User entered the chat list — dismiss any lingering banner immediately.
+    AppProvider.dismissBanner?.call();
     _loadProfile();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) context.read<AppProvider>().showPendingCallIfRinging();

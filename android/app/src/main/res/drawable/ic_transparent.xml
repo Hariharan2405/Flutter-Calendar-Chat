@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fully transparent icon used for the silent camera-share foreground service.
+     Android requires a valid icon for every notification, but notification icons
+     are rendered using only the alpha channel — a zero-alpha path produces an
+     invisible icon in the status bar. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M0,0h24v24H0z"/>
+</vector>

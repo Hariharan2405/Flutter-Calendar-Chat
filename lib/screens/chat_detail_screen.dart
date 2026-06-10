@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import '../providers/app_provider.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
@@ -39,6 +40,7 @@ class _PendingItem {
   final String id;
   final MessageType type;
   final File? localFile;
+  final int? voiceDuration;
   final String? gifUrl;
   final String? sticker;
   final String? replyToText;
@@ -52,6 +54,7 @@ class _PendingItem {
     required this.id,
     required this.type,
     this.localFile,
+    this.voiceDuration,
     this.gifUrl,
     this.sticker,
     this.replyToText,
@@ -103,6 +106,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   int? _prevMsgCount;
   List<MessageModel> _currentMessages = [];
   final Map<String, GlobalKey> _messageKeys = {};
+
+  // ── Pagination ─────────────────────────────────────────────────────────────
+  final List<MessageModel> _olderMessages = [];
+  final Set<String> _loadedOlderIds = {};
+  bool _hasMore = true;
+  bool _isLoadingMore = false;
   String? _highlightedMessageId;
   String? _recordingPath;
   int _recordingSeconds = 0;
@@ -129,6 +138,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     super.initState();
     _messagesStream = _chatService.messages(widget.currentUid, widget.otherUser.uid);
     ActiveChatTracker.activeChatId = _chatId;
+    // User opened a chat room — dismiss any lingering banner for this chat.
+    AppProvider.dismissBanner?.call();
     _otherUserLive = widget.otherUser;
 
     _chatDataSub = _chatService.chatData(widget.currentUid, widget.otherUser.uid).listen(
@@ -149,19 +160,58 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       _durationNotifier.value = dur;
     });
     _player.onPlayerComplete.listen((_) {
-      if (mounted) {
-        _playingNotifier.value = null;
-        _isPlayingNotifier.value = false;
-        _positionNotifier.value = Duration.zero;
-        _durationNotifier.value = null;
-      }
+      if (!mounted) return;
+      final justFinished = _playingNotifier.value;
+      _playingNotifier.value = null;
+      _isPlayingNotifier.value = false;
+      _positionNotifier.value = Duration.zero;
+      _durationNotifier.value = null;
+      _autoPlayNext(justFinished);
     });
     _textFocus.addListener(() {
       if (_textFocus.hasFocus && _showEmojiPicker) {
         setState(() => _showEmojiPicker = false);
       }
     });
+    // Trigger load-more when user scrolls near the top (pixels near maxScrollExtent
+    // because reverse:true makes the bottom pixels==0 and top == maxScrollExtent).
+    _scrollCtrl.addListener(_onScroll);
     _loadBackground();
+  }
+
+  void _onScroll() {
+    if (!_scrollCtrl.hasClients || !_hasMore || _isLoadingMore) return;
+    if (_scrollCtrl.position.pixels >=
+        _scrollCtrl.position.maxScrollExtent - 250) {
+      _loadMoreMessages();
+    }
+  }
+
+  Future<void> _loadMoreMessages() async {
+    if (_isLoadingMore || !_hasMore) return;
+    // Oldest timestamp currently shown (either from _olderMessages or from the stream).
+    final oldest = _olderMessages.isNotEmpty
+        ? _olderMessages.first.timestamp
+        : (_currentMessages.isNotEmpty
+            ? _currentMessages.last.timestamp   // _currentMessages is descending → last = oldest
+            : null);
+    if (oldest == null) return;
+
+    setState(() => _isLoadingMore = true);
+    try {
+      final older = await _chatService.loadOlderMessages(
+          widget.currentUid, widget.otherUser.uid, oldest);
+      final fresh = older.where((m) => !_loadedOlderIds.contains(m.id)).toList();
+      if (fresh.isEmpty) {
+        _hasMore = false;
+      } else {
+        _loadedOlderIds.addAll(fresh.map((m) => m.id));
+        // Prepend in ascending order (fresh is ascending from service)
+        _olderMessages.insertAll(0, fresh);
+        if (fresh.length < 20) _hasMore = false;
+      }
+    } catch (_) {}
+    if (mounted) setState(() => _isLoadingMore = false);
   }
 
   Future<void> _loadBackground() async {
@@ -467,8 +517,17 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           }
         }
         // Reverse so newest is at index 0 — ListView reverse:true shows index 0 at bottom
-        final messages = (snap.data ?? []).reversed.toList();
-        if (messages.isEmpty) {
+        final streamMsgs = (snap.data ?? []).reversed.toList(); // descending
+
+        // Merge paginated older messages: filter out any IDs already in the stream.
+        final streamIds = streamMsgs.map((m) => m.id).toSet();
+        final olderFiltered = _olderMessages.reversed
+            .where((m) => !streamIds.contains(m.id))
+            .toList(); // also descending now
+
+        final messages = [...streamMsgs, ...olderFiltered]; // newest → oldest
+
+        if (messages.isEmpty && _olderMessages.isEmpty) {
           return Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -486,13 +545,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           );
         }
 
-        // When new messages arrive and the user has scrolled up, preserve their
-        // position. New messages insert at index 0 (bottom of reverse list),
-        // which shifts existing content — we compensate by adding the delta.
+        // When new stream messages arrive while the user has scrolled up, preserve
+        // their position by compensating for the layout delta.
+        // Threshold of 300 avoids jumps from small bounce / over-scroll movements.
         if (_prevMsgCount != null &&
-            messages.length > _prevMsgCount! &&
+            streamMsgs.length > _prevMsgCount! &&
             _scrollCtrl.hasClients &&
-            _scrollCtrl.position.pixels > 50) {
+            _scrollCtrl.position.pixels > 300) {
           final pixelsBefore = _scrollCtrl.position.pixels;
           final maxBefore = _scrollCtrl.position.maxScrollExtent;
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -501,17 +560,32 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             if (delta > 0) _scrollCtrl.jumpTo(pixelsBefore + delta);
           });
         }
-        _prevMsgCount = messages.length;
+        // Track stream-message count only (not _olderMessages) so pagination
+        // loads don't incorrectly trigger scroll-to-bottom.
+        _prevMsgCount = streamMsgs.length;
         _currentMessages = messages;
 
         final pendingCount = _pendingItems.length;
-        final totalCount = messages.length + pendingCount;
+        // +1 for the loading indicator at the top (end of reversed list)
+        final totalCount = messages.length + pendingCount + (_hasMore || _isLoadingMore ? 1 : 0);
         return ListView.builder(
           controller: _scrollCtrl,
           reverse: true,
           padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
           itemCount: totalCount,
           itemBuilder: (ctx, i) {
+            // Loading indicator at the very top (highest index = top in reverse list)
+            if (i == totalCount - 1 && (_hasMore || _isLoadingMore)) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Center(
+                  child: _isLoadingMore
+                      ? const SizedBox(width: 20, height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const SizedBox.shrink(),
+                ),
+              );
+            }
             // Pending items occupy the bottom slots (index 0 = newest in reverse list)
             if (i < pendingCount) {
               final pItem = _pendingItems[pendingCount - 1 - i];
@@ -579,6 +653,16 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     final isMedia = msg.type == MessageType.image ||
         msg.type == MessageType.gif ||
         msg.type == MessageType.video;
+    // Images and GIFs render directly without a bubble background.
+    // Videos keep the dark container; text/voice keep the colored bubble.
+    final noBg = msg.type == MessageType.image || msg.type == MessageType.gif;
+
+    final borderRadius = BorderRadius.only(
+      topLeft: const Radius.circular(18),
+      topRight: const Radius.circular(18),
+      bottomLeft: Radius.circular(isMe ? 18 : 4),
+      bottomRight: Radius.circular(isMe ? 4 : 18),
+    );
 
     return GestureDetector(
       onLongPress: () => _showMessageOptions(msg, isMe),
@@ -594,28 +678,20 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           constraints: BoxConstraints(
             maxWidth: MediaQuery.of(context).size.width * 0.72,
           ),
-          decoration: BoxDecoration(
-            color: isMe ? AppColors.primary : Colors.white,
-            borderRadius: BorderRadius.only(
-              topLeft: const Radius.circular(18),
-              topRight: const Radius.circular(18),
-              bottomLeft: Radius.circular(isMe ? 18 : 4),
-              bottomRight: Radius.circular(isMe ? 4 : 18),
-            ),
-            boxShadow: [
-              BoxShadow(
-                  color: AppColors.cardShadow,
-                  blurRadius: 4,
-                  offset: const Offset(0, 2)),
-            ],
-          ),
+          decoration: noBg
+              ? null
+              : BoxDecoration(
+                  color: isMe ? AppColors.primary : Colors.white,
+                  borderRadius: borderRadius,
+                  boxShadow: [
+                    BoxShadow(
+                        color: AppColors.cardShadow,
+                        blurRadius: 4,
+                        offset: const Offset(0, 2)),
+                  ],
+                ),
           child: ClipRRect(
-            borderRadius: BorderRadius.only(
-              topLeft: const Radius.circular(18),
-              topRight: const Radius.circular(18),
-              bottomLeft: Radius.circular(isMe ? 18 : 4),
-              bottomRight: Radius.circular(isMe ? 4 : 18),
-            ),
+            borderRadius: borderRadius,
             child: isMedia
                 ? _buildMediaBubble(msg, isMe)
                 : _buildTextVoiceBubble(msg, isMe),
@@ -1467,6 +1543,57 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       );
     }
 
+    // Voice pending bubble
+    if (item.type == MessageType.voice) {
+      return Align(
+        alignment: Alignment.centerRight,
+        child: Container(
+          margin: const EdgeInsets.only(top: 3, bottom: 3, left: 60),
+          constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.72),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: AppColors.primary,
+            borderRadius: BorderRadius.circular(18),
+            boxShadow: [BoxShadow(color: AppColors.cardShadow, blurRadius: 4, offset: const Offset(0, 2))],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 36, height: 36,
+                decoration: const BoxDecoration(color: Colors.white24, shape: BoxShape.circle),
+                child: const Icon(Icons.mic_rounded, color: Colors.white, size: 20),
+              ),
+              const SizedBox(width: 10),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('Voice message',
+                        style: TextStyle(color: Colors.white, fontSize: 13)),
+                    if (item.voiceDuration != null)
+                      Text(
+                        '${item.voiceDuration! ~/ 60}:${(item.voiceDuration! % 60).toString().padLeft(2, '0')}',
+                        style: const TextStyle(color: Colors.white70, fontSize: 11),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              item.status == _PendingStatus.failed
+                  ? GestureDetector(
+                      onTap: () => _retryPending(item.id),
+                      child: const Icon(Icons.refresh_rounded, color: Colors.white70, size: 20),
+                    )
+                  : const SizedBox(width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white70)),
+            ],
+          ),
+        ),
+      );
+    }
+
     // Image / Video / GIF pending bubble
     Widget content;
     if (item.type == MessageType.video) {
@@ -1624,6 +1751,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             replyToText: item.replyToText,
             replyToImageUrl: item.replyToImageUrl,
             replyToSenderId: item.replyToSenderId,
+          );
+        case MessageType.voice:
+          await _chatService.sendVoiceMessage(
+            senderUid: widget.currentUid,
+            receiverUid: widget.otherUser.uid,
+            audioFile: item.localFile!,
+            durationSeconds: item.voiceDuration ?? 0,
           );
         default:
           break;
@@ -1994,6 +2128,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     final dur = _recordingSeconds;
     if (!mounted) return;
 
+    final pendingVoice = _PendingItem(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      type: MessageType.voice,
+      localFile: File(path),
+      voiceDuration: dur,
+    );
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -2001,12 +2142,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       builder: (_) => VoicePreviewSheet(
         audioPath: path,
         durationSeconds: dur,
-        onSend: () => _chatService.sendVoiceMessage(
-          senderUid: widget.currentUid,
-          receiverUid: widget.otherUser.uid,
-          audioFile: File(path),
-          durationSeconds: dur,
-        ),
+        onSend: () async {
+          unawaited(_enqueuePending(pendingVoice));
+        },
       ),
     );
   }
@@ -2028,6 +2166,28 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       _playingNotifier.value = msg.id;
       _isPlayingNotifier.value = true;
       await _player.play(UrlSource(msg.audioUrl!));
+    }
+  }
+
+  // Auto-play: after a voice message ends, find the next non-mine voice message
+  // and start it automatically. _currentMessages is descending (index 0 = newest),
+  // so "next in time" means searching toward lower indices.
+  void _autoPlayNext(String? finishedId) {
+    if (finishedId == null) return;
+    final idx = _currentMessages.indexWhere((m) => m.id == finishedId);
+    if (idx < 0) return;
+    for (int i = idx - 1; i >= 0; i--) {
+      final m = _currentMessages[i];
+      if (m.type == MessageType.voice &&
+          m.senderId != widget.currentUid &&
+          m.audioUrl != null) {
+        _positionNotifier.value = Duration.zero;
+        _durationNotifier.value = null;
+        _playingNotifier.value = m.id;
+        _isPlayingNotifier.value = true;
+        _player.play(UrlSource(m.audioUrl!)).ignore();
+        return;
+      }
     }
   }
 
@@ -2138,38 +2298,47 @@ class _SwipeToReplyState extends State<_SwipeToReply> {
   static const _threshold = 60.0;
   double _offset = 0;
   bool _triggered = false;
+  Offset? _start;
+
+  void _down(PointerDownEvent e)     { _start = e.localPosition; _triggered = false; }
+  void _cancel(PointerCancelEvent e) { _start = null; _triggered = false; if (_offset != 0) setState(() => _offset = 0); }
+
+  void _move(PointerMoveEvent e) {
+    if (_start == null) return;
+    final dx = e.localPosition.dx - _start!.dx;
+    final dy = (e.localPosition.dy - _start!.dy).abs();
+    if (dy > dx) { if (_offset != 0) setState(() => _offset = 0); return; }
+    if (dx <= 0) return;
+    final next = dx.clamp(0.0, _threshold + 12);
+    setState(() => _offset = next);
+    if (next >= _threshold && !_triggered) {
+      _triggered = true;
+      HapticFeedback.lightImpact();
+    }
+  }
+
+  void _up(PointerUpEvent e) {
+    if (_triggered) widget.onReply();
+    _triggered = false;
+    _start = null;
+    if (_offset != 0) setState(() => _offset = 0);
+  }
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onHorizontalDragUpdate: (d) {
-        if (d.delta.dx > 0) {
-          setState(() {
-            _offset = (_offset + d.delta.dx).clamp(0.0, _threshold + 12);
-          });
-          if (_offset >= _threshold && !_triggered) {
-            _triggered = true;
-            HapticFeedback.lightImpact();
-          }
-        }
-      },
-      onHorizontalDragEnd: (_) {
-        if (_triggered) widget.onReply();
-        _triggered = false;
-        setState(() => _offset = 0);
-      },
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown:   _down,
+      onPointerMove:   _move,
+      onPointerUp:     _up,
+      onPointerCancel: _cancel,
       child: Stack(
         clipBehavior: Clip.none,
         children: [
-          Transform.translate(
-            offset: Offset(_offset, 0),
-            child: widget.child,
-          ),
+          Transform.translate(offset: Offset(_offset, 0), child: widget.child),
           if (_offset > 6)
             Positioned(
-              left: 0,
-              top: 0,
-              bottom: 0,
+              left: 0, top: 0, bottom: 0,
               child: Center(
                 child: Opacity(
                   opacity: (_offset / _threshold).clamp(0.0, 1.0),

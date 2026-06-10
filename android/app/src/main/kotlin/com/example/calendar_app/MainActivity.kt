@@ -54,11 +54,33 @@ class MainActivity : FlutterActivity() {
                 }
                 "startCallService" -> {
                     val name = call.arguments as? String ?: "Contact"
-                    startService(CallForegroundService.startIntent(this, name))
+                    val intent = CallForegroundService.startIntent(this, name)
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(intent)
+                        } else {
+                            startService(intent)
+                        }
+                    } catch (_: Exception) {}
+                    result.success(null)
+                }
+                "startCameraShareService" -> {
+                    val intent = CallForegroundService.startSilentIntent(this)
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(intent)
+                        } else {
+                            startService(intent)
+                        }
+                    } catch (_: Exception) {}
                     result.success(null)
                 }
                 "stopCallService" -> {
-                    startService(CallForegroundService.stopIntent(this))
+                    // stopService() works from any app state; startService() with a stop
+                    // action fails from background (Android 8+ background service restriction).
+                    try {
+                        stopService(Intent(this, CallForegroundService::class.java))
+                    } catch (_: Exception) {}
                     result.success(null)
                 }
                 "closePip" -> {

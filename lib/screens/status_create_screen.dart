@@ -9,6 +9,7 @@ import '../constants/app_theme.dart';
 import '../services/status_service.dart';
 import '../utils/snack_util.dart';
 import 'image_edit_screen.dart';
+import 'video_trim_screen.dart';
 
 class StatusCreateScreen extends StatefulWidget {
   final String uid;
@@ -59,11 +60,33 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
     _videoCtrl = null;
 
     if (type == 'video') {
-      final ctrl = VideoPlayerController.file(File(file.path));
+      // Push the trim screen; it returns the trimmed File (or null on cancel).
+      final trimmed = await Navigator.push<File>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => VideoTrimScreen(videoFile: File(file!.path)),
+        ),
+      );
+      if (!mounted) return;
+      if (trimmed == null) return; // user cancelled trim
+
+      final ctrl = VideoPlayerController.file(trimmed);
       await ctrl.initialize();
       ctrl.setLooping(true);
       ctrl.play();
-      if (mounted) setState(() => _videoCtrl = ctrl);
+      if (mounted) {
+        setState(() {
+          _videoCtrl = ctrl;
+          _mediaFile = trimmed;
+          _mediaType = 'video';
+          _musicUrl = null;
+          _musicName = null;
+          _musicArtist = null;
+          _musicStartSec = 0;
+          _musicDurationSec = 0;
+        });
+      }
+      return;
     }
 
     if (mounted) {

@@ -1,7 +1,7 @@
 name: calendar_app
 description: Calendar with Tamil Nadu Holidays, Notes and Expense Tracker
 publish_to: 'none'
-version: 1.0.4+2
+version: 1.0.8+4
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

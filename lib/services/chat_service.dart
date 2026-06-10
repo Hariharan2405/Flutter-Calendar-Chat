@@ -115,15 +115,33 @@ class ChatService {
 
   Stream<List<MessageModel>> messages(String uid1, String uid2) {
     final id = chatId(uid1, uid2);
-    final cutoff = DateTime.now().subtract(const Duration(days: 3));
+    final cutoff = DateTime.now().subtract(const Duration(days: 2));
     return _db
         .collection('chats')
         .doc(id)
         .collection('messages')
         .where('timestamp', isGreaterThan: Timestamp.fromDate(cutoff))
         .orderBy('timestamp')
+        .limitToLast(20)
         .snapshots()
         .map((snap) => snap.docs.map(MessageModel.fromFirestore).toList());
+  }
+
+  /// Fetches up to 20 messages older than [before], used for pagination.
+  Future<List<MessageModel>> loadOlderMessages(
+      String uid1, String uid2, DateTime before) async {
+    final id = chatId(uid1, uid2);
+    final cutoff = DateTime.now().subtract(const Duration(days: 2));
+    final snap = await _db
+        .collection('chats')
+        .doc(id)
+        .collection('messages')
+        .where('timestamp', isGreaterThan: Timestamp.fromDate(cutoff))
+        .where('timestamp', isLessThan: Timestamp.fromDate(before))
+        .orderBy('timestamp')
+        .limitToLast(20)
+        .get();
+    return snap.docs.map(MessageModel.fromFirestore).toList();
   }
 
   Stream<Map<String, dynamic>?> chatData(String uid1, String uid2) {

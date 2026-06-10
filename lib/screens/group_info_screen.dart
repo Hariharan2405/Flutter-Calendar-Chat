@@ -255,7 +255,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
             padding: const EdgeInsets.symmetric(vertical: 24),
             child: Column(children: [
               GestureDetector(
-                onTap: _iAmAdmin ? _changeIcon : null,
+                onTap: _changeIcon, // any member can change the group photo
                 child: Stack(alignment: Alignment.center, children: [
                   CircleAvatar(
                     radius: 44,
@@ -268,7 +268,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
                   ),
                   if (_uploadingIcon)
                     const CircularProgressIndicator(),
-                  if (_iAmAdmin && !_uploadingIcon)
+                  if (!_uploadingIcon)
                     Positioned(
                       bottom: 0, right: 0,
                       child: Container(

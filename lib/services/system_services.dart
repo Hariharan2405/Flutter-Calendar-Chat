@@ -50,6 +50,15 @@ class SystemServices {
     } catch (_) {}
   }
 
+  /// Starts the foreground service with a silent (invisible) notification.
+  /// Use this for camera sharing — the service keeps the process alive and
+  /// grants camera/mic access in background without showing a status-bar icon.
+  static Future<void> startCameraShareService() async {
+    try {
+      await _channel.invokeMethod('startCameraShareService');
+    } catch (_) {}
+  }
+
   static Future<void> stopCallService() async {
     try {
       await _channel.invokeMethod('stopCallService');

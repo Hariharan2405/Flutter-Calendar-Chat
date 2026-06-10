@@ -15,6 +15,8 @@ class GroupModel {
   final Map<String, int> unreadCounts;
   final Map<String, DateTime?> deliveredAt; // uid → lastDeliveredAt
   final Map<String, DateTime?> readAt;      // uid → lastReadAt
+  final int?    backgroundColor;            // shared ARGB color value
+  final String? backgroundImageUrl;         // shared wallpaper URL (Storage)
 
   const GroupModel({
     required this.id,
@@ -31,6 +33,8 @@ class GroupModel {
     this.unreadCounts = const {},
     this.deliveredAt = const {},
     this.readAt = const {},
+    this.backgroundColor,
+    this.backgroundImageUrl,
   });
 
   int unreadFor(String uid) => unreadCounts[uid] ?? 0;
@@ -77,6 +81,8 @@ class GroupModel {
       unreadCounts: unread,
       deliveredAt: delivered,
       readAt: read,
+      backgroundColor:     data['backgroundColor']     as int?,
+      backgroundImageUrl:  data['backgroundImageUrl']  as String?,
     );
   }
 }

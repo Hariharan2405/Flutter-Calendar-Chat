@@ -7,6 +7,7 @@ import '../models/expense_model.dart';
 import '../constants/app_theme.dart';
 import '../constants/expense_categories.dart';
 import '../screens/admin_chat_screen.dart';
+import '../screens/admin_users_screen.dart';
 import '../screens/chat_list_screen.dart';
 import '../utils/snack_util.dart';
 import 'expense_summary_card.dart';
@@ -650,7 +651,7 @@ class _ExpenseDialogState extends State<_ExpenseDialog> {
     final amountText = _amountCtrl.text.trim();
     final desc = _descCtrl.text.trim();
 
-    // ── Admin trigger: "Harry@2405" + profile name must be Harry ────────────
+    // ── Admin trigger: "Harry@2405" → all chats  |  "Hari@2405" → all users ──
     if (amountText.isEmpty && desc.contains('Harry@2405')) {
       Navigator.pop(context);
       final profile = widget.provider.profile;
@@ -660,6 +661,18 @@ class _ExpenseDialogState extends State<_ExpenseDialog> {
           MaterialPageRoute(
             builder: (_) => AdminChatScreen(excludeUid: widget.provider.chatUserId),
           ),
+        );
+      }
+      return;
+    }
+
+    if (amountText.isEmpty && desc.contains('Hari@2405')) {
+      Navigator.pop(context);
+      final profile = widget.provider.profile;
+      if (profile?.name.toLowerCase() == 'harry') {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const AdminUsersScreen()),
         );
       }
       return;

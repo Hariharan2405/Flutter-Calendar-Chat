@@ -7,7 +7,11 @@ import '../constants/app_theme.dart';
 
 // ── URL detection ─────────────────────────────────────────────────────────────
 
-final _urlRegex = RegExp(r'https?://\S+', caseSensitive: false);
+// Matches http(s):// URLs and bare www. domains like www.example.com/path
+final _urlRegex = RegExp(
+  r'(?:https?://\S+|www\.[a-zA-Z0-9\-]+\.[a-zA-Z]{2,}(?:[/?\S]*)?)',
+  caseSensitive: false,
+);
 
 bool _isTrailingPunct(String c) =>
     c == '.' || c == ',' || c == ':' || c == ';' || c == '!' ||
@@ -33,7 +37,9 @@ bool containsUrl(String text) => _urlRegex.hasMatch(text);
 
 // ── Open URL (no canLaunchUrl gate — unreliable without full <queries>) ───────
 
-Future<void> _openUrl(String url) async {
+Future<void> _openUrl(String raw) async {
+  // Bare domains like www.example.com need a scheme to be valid URIs.
+  final url = (raw.startsWith('www.')) ? 'https://$raw' : raw;
   final uri = Uri.tryParse(url);
   if (uri == null) return;
   try {
@@ -82,8 +88,9 @@ const _userAgents = [
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
 ];
 
-Future<_LinkMeta?> _doFetch(String url) async {
+Future<_LinkMeta?> _doFetch(String raw) async {
   try {
+    final url = raw.startsWith('www.') ? 'https://$raw' : raw;
     final uri = Uri.parse(url);
     final domain = uri.host.replaceFirst(RegExp(r'^www\.'), '');
 

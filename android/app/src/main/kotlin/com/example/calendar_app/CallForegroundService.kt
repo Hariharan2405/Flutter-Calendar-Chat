@@ -6,6 +6,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -13,16 +14,25 @@ import androidx.core.app.NotificationCompat
 class CallForegroundService : Service() {
 
     companion object {
-        const val ACTION_START = "ACTION_START_CALL"
-        const val ACTION_STOP = "ACTION_STOP_CALL"
-        const val EXTRA_NAME = "otherUserName"
-        private const val CHANNEL_ID = "tn_calendar_call_service"
-        private const val NOTIFICATION_ID = 301
+        const val ACTION_START        = "ACTION_START_CALL"
+        const val ACTION_START_SILENT = "ACTION_START_CAMERA_SHARE"  // hidden notification
+        const val ACTION_STOP         = "ACTION_STOP_CALL"
+        const val EXTRA_NAME          = "otherUserName"
+
+        private const val CHANNEL_ID        = "tn_calendar_call_service"
+        private const val CHANNEL_ID_SILENT = "tn_calendar_camera_share"
+        private const val NOTIFICATION_ID   = 301
 
         fun startIntent(context: Context, name: String): Intent =
             Intent(context, CallForegroundService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_NAME, name)
+            }
+
+        /** Starts the service with a silent (IMPORTANCE_MIN) notification — no status-bar icon. */
+        fun startSilentIntent(context: Context): Intent =
+            Intent(context, CallForegroundService::class.java).apply {
+                action = ACTION_START_SILENT
             }
 
         fun stopIntent(context: Context): Intent =
@@ -37,15 +47,34 @@ class CallForegroundService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 val name = intent.getStringExtra(EXTRA_NAME) ?: "Contact"
-                ensureChannel()
-                startForeground(NOTIFICATION_ID, buildNotification(name))
+                ensureCallChannel()
+                startForegroundCompat(NOTIFICATION_ID, buildCallNotification(name))
+            }
+            ACTION_START_SILENT -> {
+                ensureSilentChannel()
+                startForegroundCompat(NOTIFICATION_ID, buildSilentNotification())
             }
             ACTION_STOP -> stopGracefully()
         }
         return START_NOT_STICKY
     }
 
-    private fun ensureChannel() {
+    /** Calls the API-29+ overload of startForeground that includes the service type. */
+    private fun startForegroundCompat(id: Int, notification: android.app.Notification) {
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                startForeground(id, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+                startForeground(id, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
+            else ->
+                startForeground(id, notification)
+        }
+    }
+
+    private fun ensureCallChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val mgr = getSystemService(NotificationManager::class.java)
             if (mgr.getNotificationChannel(CHANNEL_ID) == null) {
@@ -59,7 +88,25 @@ class CallForegroundService : Service() {
         }
     }
 
-    private fun buildNotification(otherUserName: String): android.app.Notification {
+    private fun ensureSilentChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val mgr = getSystemService(NotificationManager::class.java)
+            if (mgr.getNotificationChannel(CHANNEL_ID_SILENT) == null) {
+                mgr.createNotificationChannel(
+                    // IMPORTANCE_MIN: no status-bar icon, no sound, no heads-up.
+                    // The notification exists (required by Android) but is invisible
+                    // unless the user manually expands the shade.
+                    NotificationChannel(CHANNEL_ID_SILENT, "Background Camera", NotificationManager.IMPORTANCE_MIN).apply {
+                        setSound(null, null)
+                        enableVibration(false)
+                        setShowBadge(false)
+                    }
+                )
+            }
+        }
+    }
+
+    private fun buildCallNotification(otherUserName: String): android.app.Notification {
         val tapIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
             action = "ACTION_RETURN_TO_CALL"
             addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -79,6 +126,23 @@ class CallForegroundService : Service() {
             .build()
     }
 
+    private fun buildSilentNotification(): android.app.Notification {
+        return NotificationCompat.Builder(this, CHANNEL_ID_SILENT)
+            // Transparent icon — no visible dot in the status bar.
+            .setSmallIcon(R.drawable.ic_transparent)
+            // Empty title/text so nothing appears in the notification shade.
+            .setContentTitle("")
+            .setContentText("")
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setSilent(true)
+            // Hide from lock screen entirely.
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            // Don't show the "app name" header in the shade on API 24+.
+            .setShowWhen(false)
+            .build()
+    }
+
     private fun stopGracefully() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -90,7 +154,18 @@ class CallForegroundService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // User swiped the app from recents — process will be killed; clean up notification
         stopGracefully()
+    }
+
+    override fun onDestroy() {
+        // Called when stopService() is used directly (e.g. from background).
+        // Ensures the foreground notification is removed even without onStartCommand.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+        super.onDestroy()
     }
 }
