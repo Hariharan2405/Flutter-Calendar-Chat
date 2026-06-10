@@ -29,6 +29,7 @@ import '../screens/group_chat_screen.dart' show ActiveGroupChatTracker;
 import '../services/camera_share_service.dart';
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 
 enum ExpenseViewMode { day, week, month, year, custom }
@@ -1604,6 +1605,7 @@ class _CallVideoPipState extends State<_CallVideoPip> {
   @override
   void initState() {
     super.initState();
+    WakelockPlus.enable();
     final connectedAt = widget.callService.callConnectedAt;
     if (connectedAt != null) {
       _seconds = DateTime.now().difference(connectedAt).inSeconds;
@@ -1626,6 +1628,7 @@ class _CallVideoPipState extends State<_CallVideoPip> {
 
   @override
   void dispose() {
+    WakelockPlus.disable();
     SystemServices.onPipModeChanged = null;
     _timer?.cancel();
     super.dispose();
