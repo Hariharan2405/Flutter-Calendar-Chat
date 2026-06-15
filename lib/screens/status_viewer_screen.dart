@@ -4,6 +4,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:video_player/video_player.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import '../constants/app_theme.dart';
 import '../models/status_model.dart';
 import '../services/chat_service.dart';
@@ -84,11 +85,13 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
     _progressCtrl.addStatusListener((s) {
       if (s == AnimationStatus.completed) _advance();
     });
+    WakelockPlus.enable();
     _loadStatus();
   }
 
   @override
   void dispose() {
+    WakelockPlus.disable();
     _progressCtrl.dispose();
     _videoCtrl?.dispose();
     _musicPlayer.dispose();

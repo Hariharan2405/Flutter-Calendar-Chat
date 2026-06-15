@@ -72,4 +72,24 @@ class SystemServices {
       await _channel.invokeMethod('closePip');
     } catch (_) {}
   }
+
+  /// Opens Android's ringtone picker filtered to notification sounds.
+  /// Returns the selected URI string, null for "Silent", or throws on cancel/error.
+  static Future<String?> pickNotificationSound({String? currentUri}) async {
+    return _channel.invokeMethod<String?>('pickNotifSound', currentUri);
+  }
+
+  /// Plays a notification sound by content URI via RingtoneManager.
+  /// Pass null or empty string to play the system default notification sound.
+  static Future<void> playNotificationSound(String? uri) async {
+    try {
+      await _channel.invokeMethod('playNotifSound', uri ?? '');
+    } catch (_) {}
+  }
+
+  static Future<void> stopNotificationSound() async {
+    try {
+      await _channel.invokeMethod('stopNotifSound');
+    } catch (_) {}
+  }
 }

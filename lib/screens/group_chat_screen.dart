@@ -1153,13 +1153,35 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                     builder: (_) => GroupInfoScreen(group: group, currentUid: widget.currentUid)))
               : null,
           child: Row(children: [
-            CircleAvatar(
-              radius: 18,
-              backgroundColor: Colors.white.withValues(alpha: 0.3),
-              backgroundImage: group?.iconUrl != null
-                  ? CachedNetworkImageProvider(group!.iconUrl!) : null,
-              child: group?.iconUrl == null
-                  ? const Icon(Icons.group_rounded, color: Colors.white, size: 20) : null,
+            GestureDetector(
+              onTap: group?.iconUrl != null
+                  ? () => Navigator.push(context, MaterialPageRoute(
+                        builder: (_) => Scaffold(
+                          backgroundColor: Colors.black,
+                          appBar: AppBar(
+                            backgroundColor: Colors.transparent,
+                            iconTheme: const IconThemeData(color: Colors.white),
+                          ),
+                          body: Center(
+                            child: InteractiveViewer(
+                              child: CachedNetworkImage(
+                                imageUrl: group!.iconUrl!,
+                                placeholder: (_, __) =>
+                                    const Center(child: CircularProgressIndicator()),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ))
+                  : null,
+              child: CircleAvatar(
+                radius: 18,
+                backgroundColor: Colors.white.withValues(alpha: 0.3),
+                backgroundImage: group?.iconUrl != null
+                    ? CachedNetworkImageProvider(group!.iconUrl!) : null,
+                child: group?.iconUrl == null
+                    ? const Icon(Icons.group_rounded, color: Colors.white, size: 20) : null,
+              ),
             ),
             const SizedBox(width: 10),
             Expanded(

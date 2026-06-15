@@ -4,6 +4,7 @@ import android.app.PictureInPictureParams
 import android.content.Intent
 import android.media.Ringtone
 import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
 import android.util.Rational
 import io.flutter.embedding.android.FlutterActivity
@@ -14,7 +15,12 @@ class MainActivity : FlutterActivity() {
     private val channelName = "com.calendar_app/system"
     private var pipEnabled = false
     private var ringtone: Ringtone? = null
+    private var notifTone: Ringtone? = null
     private var systemChannel: MethodChannel? = null
+
+    // Holds the pending result while the ringtone picker activity is open
+    private var ringtonePickerResult: MethodChannel.Result? = null
+    private val ringtonePickerRequestCode = 1001
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -50,6 +56,44 @@ class MainActivity : FlutterActivity() {
                 "stopRingtone" -> {
                     ringtone?.stop()
                     ringtone = null
+                    result.success(null)
+                }
+                // Open Android's ringtone picker; returns the selected URI string (or null)
+                "pickNotifSound" -> {
+                    try {
+                        val currentUri = (call.arguments as? String)?.let { Uri.parse(it) }
+                        val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                            putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_NOTIFICATION)
+                            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+                            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
+                            putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Notification Sound")
+                            if (currentUri != null) {
+                                putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, currentUri)
+                            }
+                        }
+                        ringtonePickerResult = result
+                        startActivityForResult(intent, ringtonePickerRequestCode)
+                    } catch (e: Exception) {
+                        result.error("PICK_FAILED", e.message, null)
+                    }
+                }
+                // Play a notification sound by URI (or default if null/empty)
+                "playNotifSound" -> {
+                    try {
+                        notifTone?.stop()
+                        val uriStr = call.arguments as? String
+                        val uri = if (!uriStr.isNullOrEmpty())
+                            Uri.parse(uriStr)
+                        else
+                            RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                        notifTone = RingtoneManager.getRingtone(this, uri)
+                        notifTone?.play()
+                    } catch (_: Exception) {}
+                    result.success(null)
+                }
+                "stopNotifSound" -> {
+                    notifTone?.stop()
+                    notifTone = null
                     result.success(null)
                 }
                 "startCallService" -> {
@@ -92,6 +136,19 @@ class MainActivity : FlutterActivity() {
                 }
                 else -> result.notImplemented()
             }
+        }
+    }
+
+    // Receive the ringtone picker result and forward it to Flutter
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == ringtonePickerRequestCode) {
+            val pending = ringtonePickerResult ?: return
+            ringtonePickerResult = null
+            val uri: Uri? = data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+            // null means "Silent" was selected; empty string signals that to Dart
+            pending.success(uri?.toString())
         }
     }
 

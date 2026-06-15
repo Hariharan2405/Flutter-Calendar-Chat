@@ -29,6 +29,7 @@ import '../screens/group_chat_screen.dart' show ActiveGroupChatTracker;
 import '../services/camera_share_service.dart';
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 
 enum ExpenseViewMode { day, week, month, year, custom }
@@ -36,6 +37,10 @@ enum ExpenseViewMode { day, week, month, year, custom }
 const _activeProfileUidKey = 'active_profile_uid';
 const _showChatShortcutKey = 'show_chat_shortcut';
 const _showHomeChatButtonKey = 'show_home_chat_button';
+// null  → use built-in ringtone.mp3
+// ''    → silent (no sound)
+// else  → content URI of the user-selected notification sound
+const _notifSoundUriKey = 'notif_sound_uri';
 
 // Set to true while ChatListScreen is on screen so incoming calls
 // auto-push IncomingCallScreen without requiring a notification tap.
@@ -88,6 +93,8 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
   DateTime? _customEnd;
   bool _showChatShortcut = false;
   bool _showHomeChatButton = false;
+  // null = built-in tone, '' = silent, else = content URI
+  String? _notifSoundUri;
 
   List<NoteModel> _notesForSelectedDate = [];
   List<ExpenseModel> _expenses = [];
@@ -114,6 +121,8 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
   DateTime? get customEnd => _customEnd;
   bool get showChatShortcut => _showChatShortcut;
   bool get showHomeChatButton => _showHomeChatButton;
+  // null = built-in tone, '' = silent, else = content URI
+  String? get notifSoundUri => _notifSoundUri;
   List<NoteModel> get notesForSelectedDate => _notesForSelectedDate;
   List<ExpenseModel> get expenses => _expenses;
   Set<String> get datesWithNotes => _datesWithNotes;
@@ -154,6 +163,7 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
       }
       _showChatShortcut = prefs.getBool(_showChatShortcutKey) ?? false;
       _showHomeChatButton = prefs.getBool(_showHomeChatButtonKey) ?? false;
+      _notifSoundUri = prefs.getString(_notifSoundUriKey);
       _profile ??= await _chatService.getUserProfile(_userId!);
       await _refreshMetadata();
       _subscribeNotes();
@@ -202,6 +212,18 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_showHomeChatButtonKey, value);
+  }
+
+  /// [uri] — content URI string for a system sound, '' for silent, null to restore default.
+  Future<void> setNotifSound(String? uri) async {
+    _notifSoundUri = uri;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    if (uri == null) {
+      await prefs.remove(_notifSoundUriKey);
+    } else {
+      await prefs.setString(_notifSoundUriKey, uri);
+    }
   }
 
   Future<void> retryInitialize() async {
@@ -999,9 +1021,21 @@ Future<void> _stopCameraShare(CameraShareService service, String shareId) async 
   }
 
   void _playNotifTone() {
+    final uri = _notifSoundUri;
+
+    // '' means the user chose "Silent"
+    if (uri == '') return;
+
+    // Custom system sound — play via RingtoneManager on the native side
+    if (uri != null) {
+      SystemServices.playNotificationSound(uri).ignore();
+      Future.delayed(const Duration(milliseconds: 2000),
+          () => SystemServices.stopNotificationSound().ignore());
+      return;
+    }
+
+    // Default: built-in asset tone without stealing audio focus
     _notifPlayer.stop().then((_) async {
-      // Play without requesting audio focus so background music / voice messages
-      // are not paused or ducked.
       await _notifPlayer.setAudioContext(AudioContext(
         android: AudioContextAndroid(
           audioFocus: AndroidAudioFocus.none,
@@ -1604,6 +1638,7 @@ class _CallVideoPipState extends State<_CallVideoPip> {
   @override
   void initState() {
     super.initState();
+    WakelockPlus.enable();
     final connectedAt = widget.callService.callConnectedAt;
     if (connectedAt != null) {
       _seconds = DateTime.now().difference(connectedAt).inSeconds;
@@ -1626,6 +1661,7 @@ class _CallVideoPipState extends State<_CallVideoPip> {
 
   @override
   void dispose() {
+    WakelockPlus.disable();
     SystemServices.onPipModeChanged = null;
     _timer?.cancel();
     super.dispose();

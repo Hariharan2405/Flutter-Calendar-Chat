@@ -90,6 +90,30 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
 
   // ── Icon ──────────────────────────────────────────────────────────────────
 
+  void _viewFullPhoto(String url) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => Scaffold(
+          backgroundColor: Colors.black,
+          appBar: AppBar(
+            backgroundColor: Colors.transparent,
+            iconTheme: const IconThemeData(color: Colors.white),
+          ),
+          body: Center(
+            child: InteractiveViewer(
+              child: CachedNetworkImage(
+                imageUrl: url,
+                placeholder: (_, __) =>
+                    const Center(child: CircularProgressIndicator()),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _changeIcon() async {
     final picked = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 95);
     if (picked == null || !mounted) return;
@@ -254,10 +278,12 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
             color: AppColors.primary.withValues(alpha: 0.06),
             padding: const EdgeInsets.symmetric(vertical: 24),
             child: Column(children: [
-              GestureDetector(
-                onTap: _changeIcon, // any member can change the group photo
-                child: Stack(alignment: Alignment.center, children: [
-                  CircleAvatar(
+              Stack(alignment: Alignment.center, children: [
+                GestureDetector(
+                  onTap: _group.iconUrl != null
+                      ? () => _viewFullPhoto(_group.iconUrl!)
+                      : _changeIcon,
+                  child: CircleAvatar(
                     radius: 44,
                     backgroundColor: AppColors.primary.withValues(alpha: 0.2),
                     backgroundImage: _group.iconUrl != null
@@ -266,11 +292,14 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
                         ? const Icon(Icons.group_rounded, color: AppColors.primary, size: 44)
                         : null,
                   ),
-                  if (_uploadingIcon)
-                    const CircularProgressIndicator(),
-                  if (!_uploadingIcon)
-                    Positioned(
-                      bottom: 0, right: 0,
+                ),
+                if (_uploadingIcon)
+                  const CircularProgressIndicator(),
+                if (!_uploadingIcon)
+                  Positioned(
+                    bottom: 0, right: 0,
+                    child: GestureDetector(
+                      onTap: _changeIcon,
                       child: Container(
                         width: 26, height: 26,
                         decoration: const BoxDecoration(
@@ -278,8 +307,8 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
                         child: const Icon(Icons.camera_alt_rounded, color: Colors.white, size: 14),
                       ),
                     ),
-                ]),
-              ),
+                  ),
+              ]),
               const SizedBox(height: 12),
               Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                 Text(_group.name,

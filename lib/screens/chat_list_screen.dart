@@ -16,6 +16,7 @@ import '../models/user_profile_model.dart';
 import '../models/status_model.dart';
 import '../constants/app_theme.dart';
 import '../utils/snack_util.dart';
+import '../services/system_services.dart';
 import 'chat_detail_screen.dart';
 import 'create_group_screen.dart';
 import 'group_chat_screen.dart';
@@ -113,6 +114,27 @@ class _ChatListScreenState extends State<ChatListScreen> {
     }
   }
 
+  Future<void> _pickNotifSound() async {
+    final provider = context.read<AppProvider>();
+    try {
+      // null return = user cancelled the picker (pressed back)
+      final uri = await SystemServices.pickNotificationSound(
+          currentUri: provider.notifSoundUri);
+      if (!mounted) return;
+      await provider.setNotifSound(uri);
+      // Play a brief preview so the user hears the selected sound immediately
+      if (uri != '') SystemServices.playNotificationSound(uri).ignore();
+      final label = uri == null
+          ? 'Default'
+          : uri == ''
+              ? 'Silent'
+              : 'Custom sound';
+      context.showSuccess('Notification sound: $label');
+    } catch (_) {
+      // User pressed back without selecting — no-op
+    }
+  }
+
   Future<void> _pickProfilePhoto() async {
     final picked = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 95);
     if (picked == null || !mounted) return;
@@ -159,6 +181,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
             icon: const Icon(Icons.more_vert, color: Colors.white),
             onSelected: (v) {
               if (v == 'trigger') _changeTriggerWord();
+              if (v == 'notif_sound') _pickNotifSound();
               if (v == 'toggle_home_button') {
                 final provider = context.read<AppProvider>();
                 provider.toggleHomeChatButton(!provider.showHomeChatButton);
@@ -172,6 +195,16 @@ class _ChatListScreenState extends State<ChatListScreen> {
                     Icon(Icons.chat_bubble_outline_rounded, size: 20),
                     SizedBox(width: 10),
                     Text('Chat shortcut keyword'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'notif_sound',
+                child: Row(
+                  children: [
+                    Icon(Icons.notifications_active_rounded, size: 20),
+                    SizedBox(width: 10),
+                    Text('Notification sound'),
                   ],
                 ),
               ),
