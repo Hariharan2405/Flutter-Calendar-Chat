@@ -6,9 +6,11 @@ import '../providers/app_provider.dart';
 import '../services/chat_service.dart';
 import '../constants/app_theme.dart';
 import '../utils/snack_util.dart';
+import '../services/update_service.dart';
 import '../widgets/calendar_widget.dart';
 import '../widgets/notes_section.dart';
 import '../widgets/expense_section.dart';
+import '../widgets/update_dialog.dart';
 import 'chat_list_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -56,7 +58,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setLocal) => Dialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-          child: SingleChildScrollView(
+          // Keep the form a readable width instead of filling a tablet screen.
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 460),
+            child: SingleChildScrollView(
             padding: const EdgeInsets.all(24),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -196,7 +201,40 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               ],
             ),
           ),
+          ),
         ),
+      ),
+    );
+  }
+
+  // Tap the version label to check for updates on demand.
+  Future<void> _checkForUpdatesManually() async {
+    context.showSuccess('Checking for updates…');
+    final info = await UpdateService.checkForUpdate();
+    if (!mounted) return;
+    if (info != null) {
+      await UpdateDialog.show(context, info);
+    } else {
+      context.showSuccess("You're on the latest version");
+    }
+  }
+
+  // Long-press the version label to see exactly what the update check sees.
+  Future<void> _showUpdateDiagnostics() async {
+    final report = await UpdateService.diagnose();
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Update diagnostics'),
+        content: SelectableText(report,
+            style: const TextStyle(fontSize: 12, height: 1.5)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+        ],
       ),
     );
   }
@@ -292,156 +330,182 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         backgroundColor: AppColors.background,
         body: SafeArea(
           child: LayoutBuilder(
-            builder: (context, constraints) => Column(
-            children: [
-            // ── Top half: Calendar ─────────────────────────────────────────
-            SizedBox(
-              height: constraints.maxHeight * 0.48,
-              child: const CalendarWidget(),
-            ),
-
-            // ── Bottom half: Notes + Expenses ─────────────────────────────
-            Expanded(
-              child: Container(
-                decoration: const BoxDecoration(
-                  color: AppColors.surface,
-                  borderRadius: BorderRadius.vertical(top: Radius.circular(0)),
-                  boxShadow: [
-                    BoxShadow(
-                      color: AppColors.cardShadow,
-                      blurRadius: 10,
-                      offset: Offset(0, -4),
-                    ),
-                  ],
-                ),
-                child: Column(
+            builder: (context, constraints) {
+              // Anything wide and landscape — a tablet, or a phone turned
+              // sideways where a stacked calendar would have no room — puts
+              // the calendar and the notes/expenses panel side by side.
+              // Portrait keeps the stacked phone layout.
+              final sideBySide = constraints.maxWidth >= 720 &&
+                  constraints.maxWidth > constraints.maxHeight;
+              if (sideBySide) {
+                return Row(
                   children: [
-                    // Tab bar
-                    Container(
-                      color: AppColors.surface,
-                      child: TabBar(
-                        controller: _tabCtrl,
-                        tabs: [
-                          Tab(
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.sticky_note_2_rounded, size: 16),
-                                const SizedBox(width: 6),
-                                Text(
-                                  'Notes',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: _tabCtrl.index == 0
-                                        ? FontWeight.w700
-                                        : FontWeight.normal,
-                                  ),
-                                ),
-                                if (provider.notesForSelectedDate.isNotEmpty) ...[
-                                  const SizedBox(width: 6),
-                                  Container(
-                                    width: 18,
-                                    height: 18,
-                                    decoration: const BoxDecoration(
-                                      color: AppColors.noteIndicator,
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: Center(
-                                      child: Text(
-                                        '${provider.notesForSelectedDate.length}',
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                          ),
-                          Tab(
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.account_balance_wallet_rounded, size: 16),
-                                const SizedBox(width: 6),
-                                const Text(
-                                  'Expenses',
-                                  style: TextStyle(fontSize: 13),
-                                ),
-                                if (provider.expenses.isNotEmpty) ...[
-                                  const SizedBox(width: 6),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: AppColors.expenseIndicator,
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: Text(
-                                      NumberFormat.compactCurrency(
-                                        symbol: '₹',
-                                        decimalDigits: 0,
-                                      ).format(provider.totalExpenses),
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 9,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                          ),
-                        ],
-                        labelColor: AppColors.primary,
-                        unselectedLabelColor: AppColors.textSecondary,
-                        indicatorColor: AppColors.primary,
-                        dividerColor: AppColors.divider,
-                      ),
-                    ),
+                    Expanded(flex: 5, child: const CalendarWidget()),
+                    Expanded(flex: 4, child: _buildPanel(provider, sideBySide: true)),
+                  ],
+                );
+              }
+              return Column(
+                children: [
+                  // ── Top: Calendar ────────────────────────────────────────
+                  SizedBox(
+                    // A tablet in portrait has height to spare, so give the
+                    // calendar a little more of it.
+                    height: constraints.maxHeight *
+                        (constraints.maxWidth >= 600 ? 0.52 : 0.48),
+                    child: const CalendarWidget(),
+                  ),
 
-                    // Tab views
-                    Expanded(
-                      child: TabBarView(
-                        controller: _tabCtrl,
-                        children: const [
-                          NotesSection(),
-                          ExpenseSection(),
-                        ],
-                      ),
-                    ),
+                  // ── Bottom: Notes + Expenses ─────────────────────────────
+                  Expanded(child: _buildPanel(provider, sideBySide: false)),
+                ],
+              );
+            },
+          ),
+        ),
+        floatingActionButton: provider.showHomeChatButton
+            ? FloatingActionButton(
+                backgroundColor: AppColors.primary,
+                child: const Icon(Icons.chat_rounded, color: Colors.white),
+                onPressed: () {
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => const ChatListScreen()));
+                },
+              )
+            : null,
+      ),
+    );
+  }
 
-                    if (_appVersion.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 6),
-                        child: Text(
-                          _appVersion,
-                          style: const TextStyle(
-                            fontSize: 10,
-                            color: AppColors.textSecondary,
-                          ),
+  /// The Notes / Expenses panel. [sideBySide] is true when it sits beside the
+  /// calendar rather than beneath it — only the shadow direction differs.
+  Widget _buildPanel(AppProvider provider, {required bool sideBySide}) {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.cardShadow,
+            blurRadius: 10,
+            offset: sideBySide ? const Offset(-4, 0) : const Offset(0, -4),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          // Tab bar
+          Container(
+            color: AppColors.surface,
+            child: TabBar(
+              controller: _tabCtrl,
+              tabs: [
+                Tab(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.sticky_note_2_rounded, size: 16),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Notes',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: _tabCtrl.index == 0
+                              ? FontWeight.w700
+                              : FontWeight.normal,
                         ),
                       ),
-                  ],
+                      if (provider.notesForSelectedDate.isNotEmpty) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          width: 18,
+                          height: 18,
+                          decoration: const BoxDecoration(
+                            color: AppColors.noteIndicator,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Center(
+                            child: Text(
+                              '${provider.notesForSelectedDate.length}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                Tab(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.account_balance_wallet_rounded, size: 16),
+                      const SizedBox(width: 6),
+                      const Text(
+                        'Expenses',
+                        style: TextStyle(fontSize: 13),
+                      ),
+                      if (provider.expenses.isNotEmpty) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: AppColors.expenseIndicator,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            NumberFormat.compactCurrency(
+                              symbol: '₹',
+                              decimalDigits: 0,
+                            ).format(provider.totalExpenses),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 9,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+              labelColor: AppColors.primary,
+              unselectedLabelColor: AppColors.textSecondary,
+              indicatorColor: AppColors.primary,
+              dividerColor: AppColors.divider,
+            ),
+          ),
+
+          // Tab views
+          Expanded(
+            child: TabBarView(
+              controller: _tabCtrl,
+              children: const [
+                NotesSection(),
+                ExpenseSection(),
+              ],
+            ),
+          ),
+
+          if (_appVersion.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: GestureDetector(
+                onTap: _checkForUpdatesManually,
+                onLongPress: _showUpdateDiagnostics,
+                child: Text(
+                  _appVersion,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    color: AppColors.textSecondary,
+                  ),
                 ),
               ),
             ),
-          ],
-        ),
-        ),
-      ),
-      floatingActionButton: provider.showHomeChatButton
-          ? FloatingActionButton(
-              backgroundColor: AppColors.primary,
-              child: const Icon(Icons.chat_rounded, color: Colors.white),
-              onPressed: () {
-                Navigator.push(context, MaterialPageRoute(builder: (_) => const ChatListScreen()));
-              },
-            )
-          : null,
+        ],
       ),
     );
   }

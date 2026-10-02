@@ -17,6 +17,17 @@ class GroupModel {
   final Map<String, DateTime?> readAt;      // uid → lastReadAt
   final int?    backgroundColor;            // shared ARGB color value
   final String? backgroundImageUrl;         // shared wallpaper URL (Storage)
+  final String? pinnedMessageId;
+  final String? pinnedText;
+  /// UIDs named with @ in the most recent message. A mention reaches you even
+  /// when the group is muted.
+  final List<String> lastMentions;
+  /// uid → the moment they were last seen typing. Read through
+  /// [TypingState.isActive], which treats stale stamps as "not typing".
+  final Map<String, DateTime> typingAt;
+  /// uid → display name captured alongside the typing stamp, so the indicator
+  /// can name the person without a second lookup.
+  final Map<String, String> typingNames;
 
   const GroupModel({
     required this.id,
@@ -35,6 +46,11 @@ class GroupModel {
     this.readAt = const {},
     this.backgroundColor,
     this.backgroundImageUrl,
+    this.pinnedMessageId,
+    this.pinnedText,
+    this.lastMentions = const [],
+    this.typingAt = const {},
+    this.typingNames = const {},
   });
 
   int unreadFor(String uid) => unreadCounts[uid] ?? 0;
@@ -57,6 +73,8 @@ class GroupModel {
     final unread = <String, int>{};
     final delivered = <String, DateTime?>{};
     final read = <String, DateTime?>{};
+    final typing = <String, DateTime>{};
+    final typingNames = <String, String>{};
     for (final key in data.keys) {
       if (key.startsWith('unread_')) {
         unread[key.substring(7)] = (data[key] as num?)?.toInt() ?? 0;
@@ -64,6 +82,12 @@ class GroupModel {
         delivered[key.substring(16)] = (data[key] as Timestamp?)?.toDate();
       } else if (key.startsWith('lastReadAt_')) {
         read[key.substring(11)] = (data[key] as Timestamp?)?.toDate();
+      } else if (key.startsWith('typingName_')) {
+        final v = data[key] as String?;
+        if (v != null) typingNames[key.substring(11)] = v;
+      } else if (key.startsWith('typing_')) {
+        final v = (data[key] as Timestamp?)?.toDate();
+        if (v != null) typing[key.substring(7)] = v;
       }
     }
     return GroupModel(
@@ -83,6 +107,11 @@ class GroupModel {
       readAt: read,
       backgroundColor:     data['backgroundColor']     as int?,
       backgroundImageUrl:  data['backgroundImageUrl']  as String?,
+      pinnedMessageId:     data['pinnedMessageId']     as String?,
+      pinnedText:          data['pinnedText']          as String?,
+      lastMentions: List<String>.from(data['lastMentions'] as List? ?? []),
+      typingAt: typing,
+      typingNames: typingNames,
     );
   }
 }

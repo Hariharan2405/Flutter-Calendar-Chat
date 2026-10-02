@@ -9,7 +9,12 @@ import 'providers/app_provider.dart';
 import 'screens/home_screen.dart';
 import 'constants/app_theme.dart';
 import 'services/notification_service.dart';
+import 'services/tts_service.dart';
+import 'services/gemini_speech.dart';
+import 'services/chat_prefs.dart';
 import 'services/system_services.dart';
+import 'services/update_service.dart';
+import 'widgets/update_dialog.dart';
 
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
@@ -59,6 +64,15 @@ class MyApp extends StatelessWidget {
         theme: AppTheme.lightTheme,
         debugShowCheckedModeBanner: false,
         navigatorKey: navigatorKey,
+        // Global bottom inset: on phones with on-screen gesture/nav buttons,
+        // keep app content above them so no screen's bottom gets cropped.
+        // (top left untouched so AppBars still manage the status bar.)
+        builder: (context, child) => SafeArea(
+          top: false,
+          left: false,
+          right: false,
+          child: child ?? const SizedBox.shrink(),
+        ),
         home: const AppShell(),
       ),
     );
@@ -77,7 +91,29 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _checkPermissions());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkPermissions();
+      _checkForUpdate();
+      // Warm the speech engine and load the saved voice, so the first tap on
+      // a message's speaker icon doesn't pay for initialisation.
+      TtsService.instance.init();
+      // Remember Gemini's daily-limit wait across restarts, so a relaunch
+      // doesn't spend requests discovering the limit again.
+      GeminiSpeech.loadRestState();
+      ChatPrefs.instance.load();
+      // A sudden change of voice sounds like a bug unless it's explained.
+      TtsService.instance.onFallback = (reason) {
+        final ctx = navigatorKey.currentContext;
+        if (ctx == null) return;
+        ScaffoldMessenger.maybeOf(ctx)
+          ?..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(
+            content: Text(reason),
+            duration: const Duration(seconds: 3),
+            behavior: SnackBarBehavior.floating,
+          ));
+      };
+    });
   }
 
   @override
@@ -86,16 +122,44 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  // Re-check whenever the app returns to foreground (user may have changed settings).
+  // Re-check whenever the app returns to foreground (user may have changed
+  // settings, or a new build was published).
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _checkPermissions();
+    if (state == AppLifecycleState.resumed) {
+      _checkPermissions();
+      _checkForUpdate();
+      // Voice data may have just been installed from system settings.
+      TtsService.instance.refreshVoices();
+    } else if (state == AppLifecycleState.paused) {
+      // Don't keep talking after the app goes to the background.
+      TtsService.instance.stop();
+    }
+  }
+
+  // Prevents stacking the update dialog on itself or over the permission sheet.
+  bool _updateDialogOpen = false;
+  bool _permSheetOpen = false;
+
+  /// Prompts to update whenever a newer sideloaded build is available. Runs
+  /// independently of the permission flow (so a skipped permission never blocks
+  /// it) and on every launch/resume, so it keeps showing until the update is
+  /// done (then checkForUpdate returns null on its own).
+  Future<void> _checkForUpdate() async {
+    if (_updateDialogOpen || _permSheetOpen) return;
+    final info = await UpdateService.checkForUpdate();
+    if (info != null && mounted && !_updateDialogOpen && !_permSheetOpen) {
+      _updateDialogOpen = true;
+      await UpdateDialog.show(context, info);
+      _updateDialogOpen = false;
+    }
   }
 
   Future<void> _checkPermissions() async {
-    if (!mounted) return;
+    if (!mounted || _permSheetOpen) return;
     final missing = await _missingPermissions();
     if (missing.isEmpty || !mounted) return;
+    _permSheetOpen = true;
     await showModalBottomSheet(
       context: context,
       isDismissible: false,
@@ -112,6 +176,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         },
       ),
     );
+    _permSheetOpen = false;
   }
 
   Future<List<_PermItem>> _missingPermissions() async {

@@ -44,9 +44,17 @@ class SystemServices {
     } catch (_) {}
   }
 
-  static Future<void> startCallService(String otherUserName) async {
+  /// Starts the call foreground service. [isVideo] decides the foreground
+  /// service type: a video call declares camera + microphone, an audio call
+  /// declares microphone only. On Android 14+ declaring the camera type without
+  /// the camera permission granted throws and the mic loses background access.
+  static Future<void> startCallService(String otherUserName,
+      {bool isVideo = false}) async {
     try {
-      await _channel.invokeMethod('startCallService', otherUserName);
+      await _channel.invokeMethod('startCallService', {
+        'name': otherUserName,
+        'isVideo': isVideo,
+      });
     } catch (_) {}
   }
 
@@ -91,5 +99,78 @@ class SystemServices {
     try {
       await _channel.invokeMethod('stopNotifSound');
     } catch (_) {}
+  }
+
+  /// Copies a local audio file into the public Music/Calendar folder so it is
+  /// visible in the file manager and music apps. Returns the saved destination
+  /// string, or null on failure.
+  static Future<String?> saveAudioToMusic({
+    required String path,
+    required String name,
+    required String mime,
+  }) async {
+    try {
+      return await _channel.invokeMethod<String?>('saveAudioToMusic', {
+        'path': path,
+        'name': name,
+        'mime': mime,
+      });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Copies a local file into the public MediaStore collection for [kind]
+  /// ('image' → Pictures/Calendar, 'video' → Movies/Calendar,
+  /// 'audio' → Music/Calendar). Returns the saved content URI string (used to
+  /// later verify the file still exists), or null on failure.
+  static Future<String?> saveMediaToStore({
+    required String path,
+    required String name,
+    required String mime,
+    required String kind,
+  }) async {
+    try {
+      return await _channel.invokeMethod<String?>('saveMediaToStore', {
+        'path': path,
+        'name': name,
+        'mime': mime,
+        'kind': kind,
+      });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Launches the system installer for a downloaded APK at [path]. Returns true
+  /// if the installer was launched.
+  static Future<bool> installApk(String path) async {
+    try {
+      return await _channel.invokeMethod<bool>('installApk', path) ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Opens the device's text-to-speech settings, where voice data for a
+  /// language (Tamil, for instance) can be downloaded. Returns false if no
+  /// such screen exists on this device.
+  static Future<bool> openTtsSettings() async {
+    try {
+      return await _channel.invokeMethod<bool>('openTtsSettings') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// True if a previously-saved media file (by content URI) still exists on the
+  /// device — false if the user has deleted it.
+  static Future<bool> mediaUriExists(String? uri) async {
+    if (uri == null || uri.isEmpty) return false;
+    try {
+      return await _channel.invokeMethod<bool>('mediaUriExists', uri) ?? false;
+    } catch (_) {
+      return false;
+    }
   }
 }

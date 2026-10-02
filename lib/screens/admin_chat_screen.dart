@@ -1,10 +1,11 @@
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../constants/app_theme.dart';
 import '../models/user_profile_model.dart';
 import 'read_only_chat_screen.dart';
+import '../utils/responsive.dart';
+import '../utils/image_sizing.dart';
 
 class AdminChatScreen extends StatefulWidget {
   final String excludeUid;
@@ -73,7 +74,10 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
           ),
         ],
       ),
-      body: _loadingProfiles
+      // Centred and capped so rows don't stretch across a tablet screen.
+      body: ContentWidth(
+        maxWidth: 840,
+        child: _loadingProfiles
           ? const Center(child: CircularProgressIndicator())
           : StreamBuilder<QuerySnapshot>(
               stream: _db.collection('chats').snapshots(),
@@ -147,7 +151,7 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
                                   radius: 20,
                                   backgroundColor: AppColors.primary,
                                   backgroundImage: p1?.photoUrl != null
-                                      ? CachedNetworkImageProvider(p1!.photoUrl!)
+                                      ? avatarImage(p1!.photoUrl!, radius: 20)
                                       : null,
                                   child: p1?.photoUrl == null
                                       ? Text(name1[0].toUpperCase(),
@@ -165,7 +169,7 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
                                   radius: 16,
                                   backgroundColor: AppColors.accent,
                                   backgroundImage: p2?.photoUrl != null
-                                      ? CachedNetworkImageProvider(p2!.photoUrl!)
+                                      ? avatarImage(p2!.photoUrl!, radius: 16)
                                       : null,
                                   child: p2?.photoUrl == null
                                       ? Text(name2[0].toUpperCase(),
@@ -219,6 +223,7 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
                 );
               },
             ),
+      ),
     );
   }
 }

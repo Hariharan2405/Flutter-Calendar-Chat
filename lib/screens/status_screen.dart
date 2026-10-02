@@ -1,15 +1,18 @@
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../constants/app_theme.dart';
 import '../models/status_model.dart';
+import '../models/pending_status_upload.dart';
 import '../models/user_profile_model.dart';
 import '../providers/app_provider.dart';
 import '../services/chat_service.dart';
 import '../services/status_service.dart';
+import '../services/media_prefetcher.dart';
 import 'status_create_screen.dart';
+import '../utils/responsive.dart';
 import 'status_viewer_screen.dart';
+import '../utils/image_sizing.dart';
 
 class StatusScreen extends StatefulWidget {
   const StatusScreen({super.key});
@@ -29,13 +32,20 @@ class _StatusScreenState extends State<StatusScreen> {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(title: const Text('Status')),
-      body: StreamBuilder<List<StatusModel>>(
+      // Centred and capped so rows don't stretch across a tablet screen.
+      body: ContentWidth(
+        maxWidth: 840,
+        child: StreamBuilder<List<StatusModel>>(
         stream: _statusService.allActiveStatuses(),
         builder: (ctx, statusSnap) {
           if (statusSnap.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           }
           final allStatuses = statusSnap.data ?? [];
+
+          // Prefetch status media into the local cache so opening a status is
+          // instant (no loading spinner) — runs in the background.
+          MediaPrefetcher.prefetch(allStatuses.map((s) => s.mediaUrl));
 
           return StreamBuilder<List<UserProfileModel>>(
             stream: _chatService.getAllUsersStream(),
@@ -64,11 +74,23 @@ class _StatusScreenState extends State<StatusScreen> {
                   SliverToBoxAdapter(
                     child: _MyStatusTile(
                       uid: uid,
+                      photoUrl: context.read<AppProvider>().profile?.photoUrl,
                       ownGroup: ownGroup,
                       onViewOwn: ownGroup == null
                           ? null
                           : () => _openViewer(context, [ownGroup], 0, uid),
                       onAdd: () => _openCreate(context, uid),
+                    ),
+                  ),
+
+                  // Background uploads in progress / failed
+                  SliverToBoxAdapter(
+                    child: Consumer<AppProvider>(
+                      builder: (_, p, __) => Column(
+                        children: p.pendingStatusUploads
+                            .map((u) => _SendingStatusTile(upload: u))
+                            .toList(),
+                      ),
                     ),
                   ),
 
@@ -121,6 +143,7 @@ class _StatusScreenState extends State<StatusScreen> {
           );
         },
       ),
+      ),
       floatingActionButton: FloatingActionButton(
         onPressed: () =>
             _openCreate(context, context.read<AppProvider>().chatUserId),
@@ -159,12 +182,14 @@ class _StatusScreenState extends State<StatusScreen> {
 
 class _MyStatusTile extends StatelessWidget {
   final String uid;
+  final String? photoUrl;
   final UserStatuses? ownGroup;
   final VoidCallback? onViewOwn;
   final VoidCallback onAdd;
 
   const _MyStatusTile({
     required this.uid,
+    required this.photoUrl,
     required this.ownGroup,
     required this.onViewOwn,
     required this.onAdd,
@@ -190,7 +215,13 @@ class _MyStatusTile extends StatelessWidget {
                 _StatusRing(
                   hasStatus: hasStatus,
                   viewed: true, // own status ring is always "viewed" style
-                  child: _AvatarPlaceholder(uid: uid, radius: 26),
+                  child: photoUrl != null
+                      ? CircleAvatar(
+                          radius: 26,
+                          backgroundImage:
+                              avatarImage(photoUrl!, radius: 26),
+                        )
+                      : _AvatarPlaceholder(uid: uid, radius: 26),
                 ),
                 Positioned(
                   right: -2,
@@ -238,6 +269,110 @@ class _MyStatusTile extends StatelessWidget {
   }
 }
 
+// ── Sending / failed upload tile ────────────────────────────────────────────────
+
+class _SendingStatusTile extends StatelessWidget {
+  final PendingStatusUpload upload;
+  const _SendingStatusTile({required this.upload});
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = context.read<AppProvider>();
+    final failed = upload.state == StatusUploadState.failed;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+      child: Card(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: ListTile(
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+          leading: Stack(
+            alignment: Alignment.center,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(26),
+                child: upload.isVideo
+                    ? Container(
+                        width: 52,
+                        height: 52,
+                        color: Colors.black12,
+                        child: const Icon(Icons.videocam_rounded,
+                            color: AppColors.textSecondary),
+                      )
+                    : Image.file(
+                        upload.mediaFile,
+                        width: 52,
+                        height: 52,
+                        fit: BoxFit.cover,
+                      ),
+              ),
+              // Dim + overlay while sending
+              if (!failed)
+                Container(
+                  width: 52,
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.35),
+                    borderRadius: BorderRadius.circular(26),
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.white),
+                  ),
+                )
+              else
+                Container(
+                  width: 52,
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.35),
+                    borderRadius: BorderRadius.circular(26),
+                  ),
+                  child: const Icon(Icons.error_outline_rounded,
+                      color: Colors.white),
+                ),
+            ],
+          ),
+          title: const Text('My status',
+              style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary,
+                  fontSize: 15)),
+          subtitle: Text(
+            failed ? 'Failed to send · Tap retry' : 'Sending…',
+            style: TextStyle(
+                color: failed ? AppColors.holiday : AppColors.textSecondary,
+                fontSize: 12,
+                fontWeight: failed ? FontWeight.w600 : FontWeight.normal),
+          ),
+          trailing: failed
+              ? Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.refresh_rounded,
+                          color: AppColors.primary),
+                      tooltip: 'Retry',
+                      onPressed: () => provider.retryStatusUpload(upload.id),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close_rounded,
+                          color: AppColors.textSecondary),
+                      tooltip: 'Discard',
+                      onPressed: () => provider.dismissStatusUpload(upload.id),
+                    ),
+                  ],
+                )
+              : null,
+          onTap: failed ? () => provider.retryStatusUpload(upload.id) : null,
+        ),
+      ),
+    );
+  }
+}
+
 // ── Other user tile ────────────────────────────────────────────────────────────
 
 class _StatusTile extends StatelessWidget {
@@ -274,7 +409,7 @@ class _StatusTile extends StatelessWidget {
                   ? CircleAvatar(
                       radius: 26,
                       backgroundImage:
-                          CachedNetworkImageProvider(group.photoUrl!),
+                          avatarImage(group.photoUrl!, radius: 26),
                     )
                   : _AvatarPlaceholder(uid: group.uid, name: group.name,
                       radius: 26),

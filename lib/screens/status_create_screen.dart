@@ -4,12 +4,15 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:provider/provider.dart';
 import 'package:video_player/video_player.dart';
 import '../constants/app_theme.dart';
+import '../providers/app_provider.dart';
 import '../services/status_service.dart';
 import '../utils/snack_util.dart';
 import 'image_edit_screen.dart';
 import 'video_trim_screen.dart';
+import 'text_status_screen.dart';
 
 class StatusCreateScreen extends StatefulWidget {
   final String uid;
@@ -32,7 +35,6 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
   String? _musicArtist;
   double _musicStartSec = 0;
   double _musicDurationSec = 0;
-  bool _isUploading = false;
   bool _isPreviewingMusic = false;
 
   @override
@@ -131,6 +133,15 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
                   color: AppColors.divider,
                   borderRadius: BorderRadius.circular(2)),
             ),
+            _sheetTile(Icons.text_fields_rounded, 'Text — no photo needed', () {
+              Navigator.pop(ctx);
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => TextStatusScreen(uid: widget.uid)),
+              );
+            }),
+            const Divider(height: 8),
             _sheetTile(Icons.photo_camera_rounded, 'Photo — Camera', () {
               Navigator.pop(ctx);
               _pickMedia(ImageSource.camera, 'photo');
@@ -221,18 +232,19 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
 
   // ── Upload ────────────────────────────────────────────────────────────────────
 
-  Future<void> _upload() async {
-    if (_mediaFile == null || _isUploading) return;
-    setState(() => _isUploading = true);
-    try {
-      await _previewPlayer.stop();
-      if (_mediaType == 'photo') {
-        await _statusService.uploadPhotoStatus(
+  void _upload() {
+    if (_mediaFile == null) return;
+    _previewPlayer.stop();
+    final caption =
+        _captionCtrl.text.trim().isEmpty ? null : _captionCtrl.text.trim();
+    // Hand off to AppProvider so the upload continues in the background and the
+    // create screen can close immediately. Progress/failure shows on the status
+    // screen.
+    context.read<AppProvider>().enqueueStatusUpload(
           uid: widget.uid,
-          imageFile: _mediaFile!,
-          caption: _captionCtrl.text.trim().isEmpty
-              ? null
-              : _captionCtrl.text.trim(),
+          mediaFile: _mediaFile!,
+          mediaType: _mediaType!,
+          caption: caption,
           musicUrl: _musicUrl,
           musicName: _musicName,
           musicArtist: _musicArtist,
@@ -240,24 +252,8 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
               ? (_musicStartSec * 1000).round()
               : null,
         );
-      } else {
-        await _statusService.uploadVideoStatus(
-          uid: widget.uid,
-          videoFile: _mediaFile!,
-          caption: _captionCtrl.text.trim().isEmpty
-              ? null
-              : _captionCtrl.text.trim(),
-        );
-      }
-      if (mounted) {
-        context.showSuccess('Status posted!');
-        Navigator.pop(context);
-      }
-    } catch (_) {
-      if (mounted) context.showError('Failed to post status');
-    } finally {
-      if (mounted) setState(() => _isUploading = false);
-    }
+    context.showSuccess('Posting status…');
+    Navigator.pop(context);
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────────
@@ -272,21 +268,11 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
         title: const Text('New Status', style: TextStyle(color: Colors.white)),
         actions: [
           if (_mediaFile != null)
-            _isUploading
-                ? const Padding(
-                    padding: EdgeInsets.all(14),
-                    child: SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                            color: Colors.white, strokeWidth: 2)),
-                  )
-                : IconButton(
-                    icon: const Icon(Icons.send_rounded,
-                        color: AppColors.primary),
-                    onPressed: _upload,
-                    tooltip: 'Post',
-                  ),
+            IconButton(
+              icon: const Icon(Icons.send_rounded, color: AppColors.primary),
+              onPressed: _upload,
+              tooltip: 'Post',
+            ),
         ],
       ),
       body: _mediaFile == null ? _buildPickerPrompt() : _buildEditor(),
@@ -361,22 +347,36 @@ class _StatusCreateScreenState extends State<StatusCreateScreen> {
                 right: 16,
                 child: Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                   decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.5),
+                    // Strong dark backing so the white caption stays readable
+                    // even over bright photos.
+                    color: Colors.black.withValues(alpha: 0.78),
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: TextField(
                     controller: _captionCtrl,
-                    style:
-                        const TextStyle(color: Colors.white, fontSize: 14),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w500,
+                    ),
+                    cursorColor: Colors.white,
                     maxLines: 3,
                     minLines: 1,
                     decoration: const InputDecoration(
                       hintText: 'Add a caption...',
-                      hintStyle: TextStyle(color: Colors.white54),
+                      hintStyle: TextStyle(color: Colors.white70),
+                      // Override the global theme's light fill — otherwise a
+                      // light rectangle is painted over the dark box and the
+                      // white caption text becomes invisible.
+                      filled: false,
+                      fillColor: Colors.transparent,
                       border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
                       isDense: true,
+                      contentPadding: EdgeInsets.zero,
                     ),
                   ),
                 ),

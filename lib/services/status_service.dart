@@ -1,11 +1,15 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
+import 'package:video_compress/video_compress.dart';
 import '../models/status_model.dart';
 import '../models/user_profile_model.dart';
+import '../utils/media_compressor.dart';
+import '../utils/shared_stream.dart';
 
 class MusicTrack {
   final String name;
@@ -28,14 +32,34 @@ class StatusService {
 
   // ── Queries ──────────────────────────────────────────────────────────────────
 
-  Stream<List<StatusModel>> allActiveStatuses() {
-    return _db
+  // One shared listener for every screen that shows statuses. The chat list
+  // and the status screen are both mounted at once when you push from one to
+  // the other, so a per-screen `.snapshots()` meant two listeners over the
+  // same query — and, because these are called from `build()`, a fresh
+  // listener on every rebuild.
+  static final SharedStream<List<StatusModel>> _shared =
+      SharedStream<List<StatusModel>>(_rawActiveStatuses);
+
+  Stream<List<StatusModel>> allActiveStatuses() => _shared.stream();
+
+  static Stream<List<StatusModel>> _rawActiveStatuses() {
+    return FirebaseFirestore.instance
         .collection('statuses')
+        // Bounds what we read. Note this timestamp is fixed when the query is
+        // built, so it is a floor, not a live filter — hence the second check
+        // below, which re-evaluates on every emission.
         .where('expiresAt', isGreaterThan: Timestamp.now())
         .orderBy('expiresAt')
         .snapshots()
         .map((snap) {
-          final items = snap.docs.map(StatusModel.fromFirestore).toList();
+          final now = DateTime.now();
+          final items = snap.docs
+              .map(StatusModel.fromFirestore)
+              // Without this, a status that expires while the app is open
+              // stays on screen until the stream is rebuilt, because the
+              // query's cutoff was frozen at subscription time.
+              .where((s) => s.expiresAt.isAfter(now))
+              .toList();
           items.sort((a, b) => a.createdAt.compareTo(b.createdAt));
           return items;
         });
@@ -92,8 +116,9 @@ class StatusService {
     int? musicStartMs,
   }) async {
     final id = _uuid.v4();
+    final compressed = await MediaCompressor.compressImage(imageFile);
     final ref = _storage.ref('statuses/$uid/$id.jpg');
-    await ref.putFile(imageFile, SettableMetadata(contentType: 'image/jpeg'));
+    await ref.putFile(compressed, SettableMetadata(contentType: 'image/jpeg'));
     final mediaUrl = await ref.getDownloadURL();
     final now = DateTime.now();
     await _db.collection('statuses').doc(id).set({
@@ -111,15 +136,47 @@ class StatusService {
     });
   }
 
+  /// A text status uploads nothing — no compression, no Storage object, no
+  /// cleanup later. It is a single small document.
+  Future<void> uploadTextStatus({
+    required String uid,
+    required String text,
+    required int backgroundColor,
+  }) async {
+    final id = _uuid.v4();
+    final now = DateTime.now();
+    await _db.collection('statuses').doc(id).set({
+      'uid': uid,
+      'type': 'text',
+      'mediaUrl': '',
+      'textBody': text,
+      'backgroundColor': backgroundColor,
+      'createdAt': Timestamp.fromDate(now),
+      'expiresAt': Timestamp.fromDate(now.add(const Duration(hours: 24))),
+      'viewers': {},
+    });
+  }
+
   Future<void> uploadVideoStatus({
     required String uid,
     required File videoFile,
     String? caption,
   }) async {
     final id = _uuid.v4();
-    final ext = videoFile.path.split('.').last.toLowerCase();
+    // Compress to cut upload time and Firebase data (mirrors chat video sends).
+    File toUpload = videoFile;
+    try {
+      final info = await VideoCompress.compressVideo(
+        videoFile.path,
+        quality: VideoQuality.MediumQuality,
+        deleteOrigin: false,
+        includeAudio: true,
+      );
+      if (info?.path != null) toUpload = File(info!.path!);
+    } catch (_) {}
+    final ext = toUpload.path.split('.').last.toLowerCase();
     final ref = _storage.ref('statuses/$uid/$id.$ext');
-    await ref.putFile(videoFile);
+    await ref.putFile(toUpload);
     final mediaUrl = await ref.getDownloadURL();
     final now = DateTime.now();
     await _db.collection('statuses').doc(id).set({
@@ -154,10 +211,16 @@ class StatusService {
 
   // ── Delete ────────────────────────────────────────────────────────────────────
 
-  Future<void> deleteStatus(String statusId) async {
+  Future<void> deleteStatus(String statusId, {String? mediaUrl}) async {
     try {
       await _db.collection('statuses').doc(statusId).delete();
     } catch (_) {}
+    // Remove the backing media from Storage so it isn't orphaned.
+    if (mediaUrl != null && mediaUrl.isNotEmpty) {
+      try {
+        await _storage.refFromURL(mediaUrl).delete();
+      } catch (_) {}
+    }
   }
 
   // ── iTunes music search (free 30-second previews) ─────────────────────────────

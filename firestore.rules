@@ -2,6 +2,13 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // App version metadata for in-app updates — readable by any signed-in
+    // device; only writable from the Firebase console / admin (no client write).
+    match /version_info/{docId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
     // Private data: notes and expenses per user.
     // Also allows access from a different device's anonymous UID after the user
     // logs back in with their profile — the profile doc stores 'currentAuthUid'
@@ -18,11 +25,25 @@ service cloud.firestore {
       allow read: if request.auth != null;
       allow create, delete: if request.auth != null && request.auth.uid == userId;
       // Owner can update anything; any auth user can update presence/device fields
-      // (lastSeen for online status, fcmToken for notifications, currentAuthUid for cross-device login)
+      // (lastSeen for online status, fcmToken for notifications, currentAuthUid for cross-device login).
+      // photoUrl is in that list because after a cross-device login the request's
+      // auth UID is not the profile UID, and without it a user could not change
+      // their own profile picture on that device at all.
       allow update: if request.auth != null && (
         request.auth.uid == userId ||
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fcmToken', 'currentAuthUid', 'lastSeen'])
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fcmToken', 'currentAuthUid', 'lastSeen', 'photoUrl'])
       );
+
+      // One document per signed-in device, holding that device's FCM token.
+      // Writes are open to any authenticated user for the same reason the
+      // parent document's presence fields are: after a cross-device login the
+      // request's auth UID is not the profile UID. Reads are owner-only —
+      // the Cloud Functions that fan out notifications use the Admin SDK and
+      // bypass these rules entirely.
+      match /devices/{deviceId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow write: if request.auth != null;
+      }
     }
 
     // Camera share sessions — read/write by authenticated users.
@@ -58,7 +79,14 @@ service cloud.firestore {
     match /statuses/{statusId} {
       allow read: if request.auth != null;
       allow create: if request.auth != null;
-      allow update: if request.auth != null;
+      // The only update the app performs is markViewed(), which writes
+      // viewers.<uid>. Restricting non-owners to that key stops one user
+      // rewriting another's caption, media URL or expiry — the owner branch is
+      // kept so a future "edit my own status" path isn't blocked.
+      allow update: if request.auth != null && (
+        request.auth.uid == resource.data.uid ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewers'])
+      );
       allow delete: if request.auth != null && request.auth.uid == resource.data.uid;
     }
 

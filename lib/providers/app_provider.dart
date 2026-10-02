@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show File;
 import 'dart:math' show Random;
 import 'package:agora_rtc_engine/agora_rtc_engine.dart'
     show AgoraVideoView, VideoViewController, VideoCanvas, RtcConnection;
@@ -10,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../main.dart' show navigatorKey;
 import '../models/note_model.dart';
 import '../models/expense_model.dart';
+import '../models/pending_status_upload.dart';
 import '../models/user_profile_model.dart';
 import '../models/call_model.dart';
 import '../services/auth_service.dart';
@@ -18,6 +20,8 @@ import '../services/chat_service.dart';
 import '../services/group_chat_service.dart';
 import '../services/notes_service.dart';
 import '../services/expense_service.dart';
+import '../services/status_service.dart';
+import '../services/outbox_service.dart';
 import '../services/notification_service.dart';
 import '../services/system_services.dart';
 import '../screens/call_screen.dart';
@@ -27,6 +31,7 @@ import '../screens/chat_detail_screen.dart';
 import '../screens/camera_viewer_screen.dart';
 import '../screens/group_chat_screen.dart' show ActiveGroupChatTracker;
 import '../services/camera_share_service.dart';
+import '../services/device_token_service.dart';
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -55,6 +60,7 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
   final AuthService _authService = AuthService();
   final NotesService _notesService = NotesService();
   final ExpenseService _expenseService = ExpenseService();
+  final StatusService _statusService = StatusService();
   final ChatService _chatService = ChatService();
   final CallService _callService = CallService();
 
@@ -101,6 +107,9 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
   Set<String> _datesWithNotes = {};
   Set<String> _datesWithExpenses = {};
 
+  // Background status uploads (in-flight for this app session)
+  final List<PendingStatusUpload> _pendingStatusUploads = [];
+
   StreamSubscription<List<NoteModel>>? _notesSub;
   StreamSubscription<List<ExpenseModel>>? _expensesSub;
 
@@ -127,6 +136,7 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
   List<ExpenseModel> get expenses => _expenses;
   Set<String> get datesWithNotes => _datesWithNotes;
   Set<String> get datesWithExpenses => _datesWithExpenses;
+  List<PendingStatusUpload> get pendingStatusUploads => _pendingStatusUploads;
   bool get isLoading => _isLoading;
   bool get isCallMinimized => _callBar != null;
 
@@ -165,7 +175,10 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
       _showHomeChatButton = prefs.getBool(_showHomeChatButtonKey) ?? false;
       _notifSoundUri = prefs.getString(_notifSoundUriKey);
       _profile ??= await _chatService.getUserProfile(_userId!);
-      await _refreshMetadata();
+      // The calendar's note/expense dots are decoration, not a precondition
+      // for showing the app. Awaiting them here held the launch spinner up for
+      // two extra Firestore round trips; they now fill in when they arrive.
+      unawaited(_refreshMetadata());
       _subscribeNotes();
       _subscribeExpenses();
       _listenForIncomingCalls();
@@ -174,7 +187,10 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
       _listenForGroupDelivery();
       _startInAppNotifications();
       _startGlobalLastSeenTimer();
-      await _loadMutedGroups();
+      // Muted-group ids come from SharedPreferences and are only consulted when
+      // a notification arrives, so first paint need not wait on the read.
+      await _loadMutedGroups().timeout(const Duration(milliseconds: 400),
+          onTimeout: () {});
       _startGroupNotifications();
       unawaited(_saveFcmToken());
       _setupCallNotificationHandlers();
@@ -286,6 +302,9 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
 
     bool success = true;
+    // Signing in on another device must add that device, not replace the one
+    // already registered for this profile.
+    unawaited(DeviceTokenService.register(existing.uid));
     final token = await NotificationService.getToken();
     try {
       final updateData = <String, dynamic>{};
@@ -312,8 +331,14 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _refreshMetadata() async {
-    _datesWithNotes = await _notesService.getDatesWithNotes(chatUserId);
-    _datesWithExpenses = await _expenseService.getDatesWithExpenses(chatUserId);
+    // Two independent queries — run them together rather than one after the
+    // other, which doubled the wait for the calendar's note/expense markers.
+    final results = await Future.wait([
+      _notesService.getDatesWithNotes(chatUserId),
+      _expenseService.getDatesWithExpenses(chatUserId),
+    ]);
+    _datesWithNotes = results[0];
+    _datesWithExpenses = results[1];
     notifyListeners();
   }
 
@@ -456,13 +481,92 @@ class AppProvider extends ChangeNotifier with WidgetsBindingObserver {
     await _refreshMetadata();
   }
 
+  // ── Background status uploads ─────────────────────────────────────────────────
+
+  /// Queues a status upload and runs it in the background so the create screen
+  /// can be dismissed immediately. Progress/failure is surfaced on the status
+  /// screen via [pendingStatusUploads].
+  void enqueueStatusUpload({
+    required String uid,
+    required File mediaFile,
+    required String mediaType,
+    String? caption,
+    String? musicUrl,
+    String? musicName,
+    String? musicArtist,
+    int? musicStartMs,
+  }) {
+    final upload = PendingStatusUpload(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      uid: uid,
+      mediaFile: mediaFile,
+      mediaType: mediaType,
+      caption: caption,
+      musicUrl: musicUrl,
+      musicName: musicName,
+      musicArtist: musicArtist,
+      musicStartMs: musicStartMs,
+      createdAt: DateTime.now(),
+    );
+    _pendingStatusUploads.add(upload);
+    notifyListeners();
+    unawaited(_runStatusUpload(upload));
+  }
+
+  Future<void> _runStatusUpload(PendingStatusUpload upload) async {
+    try {
+      if (upload.mediaType == 'photo') {
+        await _statusService.uploadPhotoStatus(
+          uid: upload.uid,
+          imageFile: upload.mediaFile,
+          caption: upload.caption,
+          musicUrl: upload.musicUrl,
+          musicName: upload.musicName,
+          musicArtist: upload.musicArtist,
+          musicStartMs: upload.musicStartMs,
+        );
+      } else {
+        await _statusService.uploadVideoStatus(
+          uid: upload.uid,
+          videoFile: upload.mediaFile,
+          caption: upload.caption,
+        );
+      }
+      _pendingStatusUploads.removeWhere((u) => u.id == upload.id);
+      notifyListeners();
+    } catch (_) {
+      upload.state = StatusUploadState.failed;
+      notifyListeners();
+    }
+  }
+
+  void retryStatusUpload(String id) {
+    final upload = _pendingStatusUploads.where((u) => u.id == id).firstOrNull;
+    if (upload == null) return;
+    upload.state = StatusUploadState.uploading;
+    notifyListeners();
+    unawaited(_runStatusUpload(upload));
+  }
+
+  void dismissStatusUpload(String id) {
+    _pendingStatusUploads.removeWhere((u) => u.id == id);
+    notifyListeners();
+  }
+
   // ── FCM Token ─────────────────────────────────────────────────────────────
   Future<void> _saveFcmToken() async {
     if (_userId == null) return;
+
+    // One document per device, so every phone this profile is signed in on
+    // receives notifications instead of only the most recent one.
+    unawaited(DeviceTokenService.register(chatUserId));
+
     final token = await NotificationService.getToken();
     if (token == null) return;
     final ref =
         FirebaseFirestore.instance.collection('user_profiles').doc(chatUserId);
+    // The old single-token field is still written so a device running an older
+    // build of the app — or a server not yet redeployed — keeps working.
     // Use update() so we never create a partial document for users who haven't
     // set their name yet — update() is a no-op (throws) if the doc doesn't exist.
     try {
@@ -1224,6 +1328,8 @@ Future<void> _stopCameraShare(CameraShareService service, String shareId) async 
       if (_profile != null) _chatService.updateOnReturn(chatUserId).ignore();
       // Execute any camera switch that was deferred while app was backgrounded.
       if (_pendingCameraFacing != null) _executePendingCameraSwitch();
+      // Retry anything that failed to send while offline.
+      unawaited(OutboxService.instance.drain());
     }
   }
 
@@ -1246,9 +1352,37 @@ Future<void> _stopCameraShare(CameraShareService service, String shareId) async 
 
   static const _mutedGroupsKey = 'muted_group_ids';
 
+  static const _mutesSyncedKey = 'muted_groups_synced_to_server';
+
   Future<void> _loadMutedGroups() async {
     final prefs = await SharedPreferences.getInstance();
     _mutedGroupIds = Set<String>.from(prefs.getStringList(_mutedGroupsKey) ?? []);
+    unawaited(_backfillMutedGroups(prefs));
+  }
+
+  /// Mutes used to be stored only on the device. Now that notifications are
+  /// sent by a Cloud Function, groups muted before this change would start
+  /// pushing again unless the server is told about them — so the existing
+  /// local set is published once.
+  Future<void> _backfillMutedGroups(SharedPreferences prefs) async {
+    if (prefs.getBool(_mutesSyncedKey) ?? false) return;
+    if (_mutedGroupIds.isEmpty) {
+      await prefs.setBool(_mutesSyncedKey, true);
+      return;
+    }
+    try {
+      final db = FirebaseFirestore.instance;
+      await Future.wait(_mutedGroupIds.map((id) => db
+          .collection('group_chats')
+          .doc(id)
+          .update({
+            'mutedBy': FieldValue.arrayUnion([chatUserId])
+          })
+          .catchError((_) {})));
+      await prefs.setBool(_mutesSyncedKey, true);
+    } catch (_) {
+      // Leave the flag unset so the next launch retries.
+    }
   }
 
   bool isGroupMuted(String groupId) => _mutedGroupIds.contains(groupId);
@@ -1262,6 +1396,20 @@ Future<void> _stopCameraShare(CameraShareService service, String shareId) async 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(_mutedGroupsKey, _mutedGroupIds.toList());
     notifyListeners();
+
+    // Push notifications are sent by a Cloud Function, which cannot see this
+    // device's local preferences — mirror the choice onto the group document
+    // so a muted group stays quiet on the server side too.
+    try {
+      await FirebaseFirestore.instance
+          .collection('group_chats')
+          .doc(groupId)
+          .update({
+        'mutedBy': muted
+            ? FieldValue.arrayUnion([chatUserId])
+            : FieldValue.arrayRemove([chatUserId]),
+      });
+    } catch (_) {}
   }
 
   // ── Group in-app notifications ─────────────────────────────────────────────
@@ -1285,8 +1433,10 @@ Future<void> _stopCameraShare(CameraShareService service, String shareId) async 
         // I sent it
         if (group.lastSenderId.isEmpty || group.lastSenderId == chatUserId) continue;
 
-        // Muted by user
-        if (isGroupMuted(group.id)) continue;
+        // Muted by user — unless this message named me directly. Muting a busy
+        // group shouldn't mean missing the one message actually addressed to you.
+        final mentionsMe = group.lastMentions.contains(chatUserId);
+        if (isGroupMuted(group.id) && !mentionsMe) continue;
 
         // User is currently viewing this group
         if (ActiveGroupChatTracker.activeGroupId == group.id) continue;

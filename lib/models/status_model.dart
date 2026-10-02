@@ -3,8 +3,12 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 class StatusModel {
   final String id;
   final String uid;
-  final String type; // 'photo' | 'video'
+  final String type; // 'photo' | 'video' | 'text'
+  /// Empty for a text status — there is nothing in Storage to point at.
   final String mediaUrl;
+  /// Text statuses only: the typed body and the ARGB background it sits on.
+  final String? textBody;
+  final int? backgroundColor;
   final String? musicUrl;
   final String? musicName;
   final String? musicArtist;
@@ -19,6 +23,8 @@ class StatusModel {
     required this.uid,
     required this.type,
     required this.mediaUrl,
+    this.textBody,
+    this.backgroundColor,
     this.musicUrl,
     this.musicName,
     this.musicArtist,
@@ -30,6 +36,7 @@ class StatusModel {
   });
 
   bool get isVideo => type == 'video';
+  bool get isText => type == 'text';
   bool get hasMusic => musicUrl != null;
   bool hasViewedBy(String viewerUid) => viewers.containsKey(viewerUid);
   int get viewCount => viewers.length;
@@ -44,7 +51,10 @@ class StatusModel {
       id: doc.id,
       uid: data['uid'] as String,
       type: (data['type'] as String?) ?? 'photo',
-      mediaUrl: data['mediaUrl'] as String,
+      // Text statuses have no Storage object, so this can legitimately be absent.
+      mediaUrl: (data['mediaUrl'] as String?) ?? '',
+      textBody: data['textBody'] as String?,
+      backgroundColor: data['backgroundColor'] as int?,
       musicUrl: data['musicUrl'] as String?,
       musicName: data['musicName'] as String?,
       musicArtist: data['musicArtist'] as String?,

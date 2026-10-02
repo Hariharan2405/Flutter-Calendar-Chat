@@ -18,15 +18,17 @@ class CallForegroundService : Service() {
         const val ACTION_START_SILENT = "ACTION_START_CAMERA_SHARE"  // hidden notification
         const val ACTION_STOP         = "ACTION_STOP_CALL"
         const val EXTRA_NAME          = "otherUserName"
+        const val EXTRA_IS_VIDEO      = "isVideo"
 
         private const val CHANNEL_ID        = "tn_calendar_call_service"
         private const val CHANNEL_ID_SILENT = "tn_calendar_camera_share"
         private const val NOTIFICATION_ID   = 301
 
-        fun startIntent(context: Context, name: String): Intent =
+        fun startIntent(context: Context, name: String, isVideo: Boolean): Intent =
             Intent(context, CallForegroundService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_NAME, name)
+                putExtra(EXTRA_IS_VIDEO, isVideo)
             }
 
         /** Starts the service with a silent (IMPORTANCE_MIN) notification — no status-bar icon. */
@@ -47,26 +49,40 @@ class CallForegroundService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 val name = intent.getStringExtra(EXTRA_NAME) ?: "Contact"
+                val isVideo = intent.getBooleanExtra(EXTRA_IS_VIDEO, false)
                 ensureCallChannel()
-                startForegroundCompat(NOTIFICATION_ID, buildCallNotification(name))
+                // Audio call → microphone only. Declaring the camera type without
+                // the camera permission granted makes startForeground throw on
+                // Android 14+, which silently kills background mic access.
+                startForegroundCompat(NOTIFICATION_ID, buildCallNotification(name),
+                    withCamera = isVideo, withMicrophone = true)
             }
             ACTION_START_SILENT -> {
                 ensureSilentChannel()
-                startForegroundCompat(NOTIFICATION_ID, buildSilentNotification())
+                // Camera share → camera only (mic permission may not be granted).
+                startForegroundCompat(NOTIFICATION_ID, buildSilentNotification(),
+                    withCamera = true, withMicrophone = false)
             }
             ACTION_STOP -> stopGracefully()
         }
         return START_NOT_STICKY
     }
 
-    /** Calls the API-29+ overload of startForeground that includes the service type. */
-    private fun startForegroundCompat(id: Int, notification: android.app.Notification) {
+    /** Calls the API-29+ overload of startForeground with only the granted service types. */
+    private fun startForegroundCompat(
+        id: Int,
+        notification: android.app.Notification,
+        withCamera: Boolean,
+        withMicrophone: Boolean,
+    ) {
         when {
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
-                startForeground(id, notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
+                var type = 0
+                if (withCamera) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+                if (withMicrophone) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                startForeground(id, notification, type)
+            }
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && withCamera ->
                 startForeground(id, notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
             else ->

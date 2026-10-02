@@ -114,9 +114,11 @@ class _StickerPickerSheetState extends State<StickerPickerSheet>
               children: _categories
                   .map((cat) => GridView.builder(
                         padding: const EdgeInsets.all(8),
+                        // Extent-based so the sheet gains columns as it widens
+                        // on a tablet instead of scaling tiles up.
                         gridDelegate:
-                            const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 6,
+                            const SliverGridDelegateWithMaxCrossAxisExtent(
+                          maxCrossAxisExtent: 68,
                           mainAxisSpacing: 4,
                           crossAxisSpacing: 4,
                         ),

@@ -1,4 +1,3 @@
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../constants/app_theme.dart';
@@ -7,7 +6,9 @@ import '../providers/app_provider.dart';
 import '../services/chat_service.dart';
 import '../services/group_chat_service.dart';
 import '../utils/snack_util.dart';
+import '../utils/responsive.dart';
 import 'group_chat_screen.dart';
+import '../utils/image_sizing.dart';
 
 class CreateGroupScreen extends StatefulWidget {
   const CreateGroupScreen({super.key});
@@ -93,7 +94,10 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
             ),
         ],
       ),
-      body: Column(
+      // Centred and capped so the form doesn't stretch across a tablet screen.
+      body: ContentWidth(
+        maxWidth: 720,
+        child: Column(
         children: [
           // ── Group name field ──────────────────────────────────────────────
           Padding(
@@ -132,7 +136,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                         radius: 12,
                         backgroundColor: AppColors.primary,
                         backgroundImage: selected[i].photoUrl != null
-                            ? CachedNetworkImageProvider(selected[i].photoUrl!)
+                            ? avatarImage(selected[i].photoUrl!, radius: 12)
                             : null,
                         child: selected[i].photoUrl == null
                             ? Text(selected[i].name[0].toUpperCase(),
@@ -176,7 +180,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                         radius: 22,
                         backgroundColor: AppColors.primary,
                         backgroundImage: user.photoUrl != null
-                            ? CachedNetworkImageProvider(user.photoUrl!)
+                            ? avatarImage(user.photoUrl!, radius: 22)
                             : null,
                         child: user.photoUrl == null
                             ? Text(user.name[0].toUpperCase(),
@@ -209,6 +213,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
             ),
           ),
         ],
+      ),
       ),
       floatingActionButton: _nameCtrl.text.isNotEmpty && _selectedUids.isNotEmpty
           ? FloatingActionButton.extended(

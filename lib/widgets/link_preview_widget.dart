@@ -1,9 +1,11 @@
+import 'dart:convert';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 import '../constants/app_theme.dart';
+import '../utils/image_sizing.dart';
 
 // ── URL detection ─────────────────────────────────────────────────────────────
 
@@ -88,11 +90,69 @@ const _userAgents = [
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
 ];
 
+// Extracts an 11-char YouTube video id from any common YouTube URL shape
+// (watch?v=, youtu.be/, shorts/, live/, embed/). Returns null if not YouTube.
+String? _youtubeId(Uri uri) {
+  final host = uri.host.toLowerCase();
+  final isYt = host.contains('youtube.com') || host.contains('youtu.be');
+  if (!isYt) return null;
+
+  String? id;
+  if (host.contains('youtu.be')) {
+    id = uri.pathSegments.isNotEmpty ? uri.pathSegments.first : null;
+  } else if (uri.queryParameters['v'] != null) {
+    id = uri.queryParameters['v'];
+  } else {
+    // /shorts/<id>, /live/<id>, /embed/<id>
+    final segs = uri.pathSegments;
+    final i = segs.indexWhere(
+        (s) => s == 'shorts' || s == 'live' || s == 'embed');
+    if (i != -1 && i + 1 < segs.length) id = segs[i + 1];
+  }
+  if (id == null) return null;
+  final m = RegExp(r'^[A-Za-z0-9_-]{11}').firstMatch(id);
+  return m?.group(0);
+}
+
+/// Builds link metadata for a YouTube URL without scraping: oEmbed for the
+/// title/author and the deterministic thumbnail URL for the image.
+Future<_LinkMeta?> _youtubeMeta(Uri uri, String domain) async {
+  final id = _youtubeId(uri);
+  if (id == null) return null;
+
+  final thumb = 'https://i.ytimg.com/vi/$id/hqdefault.jpg';
+  String? title;
+  String? author;
+  try {
+    final oembed = Uri.parse(
+        'https://www.youtube.com/oembed?url=https://youtu.be/$id&format=json');
+    final resp = await http.get(oembed).timeout(const Duration(seconds: 6));
+    if (resp.statusCode == 200) {
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      title = data['title'] as String?;
+      author = data['author_name'] as String?;
+    }
+  } catch (_) {}
+
+  return _LinkMeta(
+    domain: 'youtube.com',
+    title: _unescape(title) ?? 'YouTube',
+    description: author,
+    imageUrl: thumb,
+  );
+}
+
 Future<_LinkMeta?> _doFetch(String raw) async {
   try {
     final url = raw.startsWith('www.') ? 'https://$raw' : raw;
     final uri = Uri.parse(url);
     final domain = uri.host.replaceFirst(RegExp(r'^www\.'), '');
+
+    // YouTube blocks plain scraping (consent walls / bot checks), so OG tags
+    // are usually missing. Use the public oEmbed endpoint + the deterministic
+    // thumbnail URL instead — reliable and fast.
+    final ytMeta = await _youtubeMeta(uri, domain);
+    if (ytMeta != null) return ytMeta;
 
     http.Response? response;
     for (final ua in _userAgents) {
@@ -333,6 +393,7 @@ class _LinkPreviewWidgetState extends State<LinkPreviewWidget> {
             if (meta.imageUrl != null)
               CachedNetworkImage(
                 imageUrl: meta.imageUrl!,
+                memCacheWidth: kBubbleImageDecodeWidth,
                 width: double.infinity,
                 height: 150,
                 fit: BoxFit.cover,

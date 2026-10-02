@@ -9,6 +9,8 @@ import '../services/chat_service.dart';
 import '../services/group_chat_service.dart';
 import '../utils/snack_util.dart';
 import 'profile_photo_crop_screen.dart';
+import '../utils/responsive.dart';
+import '../utils/image_sizing.dart';
 
 class GroupInfoScreen extends StatefulWidget {
   final GroupModel group;
@@ -161,7 +163,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
                 leading: CircleAvatar(
                   backgroundColor: AppColors.primary,
                   backgroundImage: u.photoUrl != null
-                      ? CachedNetworkImageProvider(u.photoUrl!) : null,
+                      ? avatarImage(u.photoUrl!, radius: 20) : null,
                   child: u.photoUrl == null
                       ? Text(u.name[0].toUpperCase(),
                           style: const TextStyle(color: Colors.white)) : null,
@@ -271,7 +273,10 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Group Info')),
-      body: ListView(
+      // Centred and capped so content doesn't stretch across a tablet screen.
+      body: ContentWidth(
+        maxWidth: 720,
+        child: ListView(
         children: [
           // ── Icon + name header ──────────────────────────────────────────
           Container(
@@ -287,7 +292,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
                     radius: 44,
                     backgroundColor: AppColors.primary.withValues(alpha: 0.2),
                     backgroundImage: _group.iconUrl != null
-                        ? CachedNetworkImageProvider(_group.iconUrl!) : null,
+                        ? avatarImage(_group.iconUrl!, radius: 44) : null,
                     child: _group.iconUrl == null
                         ? const Icon(Icons.group_rounded, color: AppColors.primary, size: 44)
                         : null,
@@ -365,7 +370,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
                   radius: 22,
                   backgroundColor: AppColors.primary,
                   backgroundImage: profile?.photoUrl != null
-                      ? CachedNetworkImageProvider(profile!.photoUrl!) : null,
+                      ? avatarImage(profile!.photoUrl!, radius: 22) : null,
                   child: profile?.photoUrl == null
                       ? Text(name[0].toUpperCase(),
                           style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
@@ -410,6 +415,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
           ),
           const SizedBox(height: 24),
         ],
+      ),
       ),
     );
   }

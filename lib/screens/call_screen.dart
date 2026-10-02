@@ -110,7 +110,8 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Future<void> _startOutgoing() async {
-    final myName = Provider.of<AppProvider>(context, listen: false).profile?.name ?? '';
+    final myName =
+        Provider.of<AppProvider>(context, listen: false).profile?.name ?? '';
     await _callService.startCall(
       callerId: widget.currentUid,
       calleeId: widget.otherUser.uid,
@@ -122,7 +123,8 @@ class _CallScreenState extends State<CallScreen> {
       },
       onStatusChange: _handleStatusChange,
     );
-    if (mounted) setState(() {}); // Force UI refresh now that engine is initialized
+    if (mounted)
+      setState(() {}); // Force UI refresh now that engine is initialized
   }
 
   Future<void> _startIncoming() async {
@@ -134,7 +136,8 @@ class _CallScreenState extends State<CallScreen> {
       },
       onStatusChange: _handleStatusChange,
     );
-    if (mounted) setState(() {}); // Force UI refresh now that engine is initialized
+    if (mounted)
+      setState(() {}); // Force UI refresh now that engine is initialized
     // Start foreground service immediately — callee is already in the channel
     _callService.setMinimizedMeta(
       otherUser: widget.otherUser,
@@ -142,7 +145,8 @@ class _CallScreenState extends State<CallScreen> {
       currentUid: widget.currentUid,
       isOutgoing: false,
     );
-    await SystemServices.startCallService(widget.otherUser.name);
+    await SystemServices.startCallService(widget.otherUser.name,
+        isVideo: _isVideo);
   }
 
   void _handleStatusChange(String status) {
@@ -158,7 +162,8 @@ class _CallScreenState extends State<CallScreen> {
         currentUid: widget.currentUid,
         isOutgoing: widget.isOutgoing,
       );
-      SystemServices.startCallService(widget.otherUser.name).ignore();
+      SystemServices.startCallService(widget.otherUser.name, isVideo: _isVideo)
+          .ignore();
       _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
         if (mounted) setState(() => _durationSeconds++);
       });
@@ -184,10 +189,11 @@ class _CallScreenState extends State<CallScreen> {
       return;
     }
 
-    if (mounted) setState(() {
-      _remoteUid = null;
-      _callState = reason;
-    });
+    if (mounted)
+      setState(() {
+        _remoteUid = null;
+        _callState = reason;
+      });
     _callService.cleanup();
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) Navigator.pop(context);
@@ -293,23 +299,37 @@ class _CallScreenState extends State<CallScreen> {
             child: Text(
               widget.otherUser.name[0].toUpperCase(),
               style: const TextStyle(
-                  fontSize: 44, fontWeight: FontWeight.bold, color: Colors.white),
+                  fontSize: 44,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white),
             ),
           ),
           const SizedBox(height: 24),
           Text(widget.otherUser.name,
               style: const TextStyle(
-                  color: Colors.white, fontSize: 26, fontWeight: FontWeight.w700)),
+                  color: Colors.white,
+                  fontSize: 26,
+                  fontWeight: FontWeight.w700)),
           const SizedBox(height: 8),
           Text(_statusText,
               style: const TextStyle(color: Colors.white60, fontSize: 16)),
           const Spacer(),
-          _buildVoiceControls(),
+          _capWidth(_buildVoiceControls()),
           const SizedBox(height: 48),
         ],
       ),
     );
   }
+
+  /// On a tablet the call buttons stay grouped instead of spreading across
+  /// the whole screen; on a phone the cap is never reached.
+  Widget _capWidth(Widget child) => Align(
+        heightFactor: 1,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: child,
+        ),
+      );
 
   Widget _buildVoiceControls() {
     return Padding(
@@ -335,9 +355,10 @@ class _CallScreenState extends State<CallScreen> {
             child: Container(
               width: 72,
               height: 72,
-              decoration:
-                  const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
-              child: const Icon(Icons.call_end_rounded, color: Colors.white, size: 34),
+              decoration: const BoxDecoration(
+                  color: Colors.red, shape: BoxShape.circle),
+              child: const Icon(Icons.call_end_rounded,
+                  color: Colors.white, size: 34),
             ),
           ),
           _ControlButton(
@@ -439,7 +460,8 @@ class _CallScreenState extends State<CallScreen> {
               top: MediaQuery.of(context).padding.top + 16,
               left: 16,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                 decoration: BoxDecoration(
                   color: Colors.black45,
                   borderRadius: BorderRadius.circular(20),
@@ -454,7 +476,7 @@ class _CallScreenState extends State<CallScreen> {
             bottom: MediaQuery.of(context).padding.bottom + 32,
             left: 0,
             right: 0,
-            child: _buildVideoControls(),
+            child: _capWidth(_buildVideoControls()),
           ),
         ],
       ],
@@ -479,9 +501,8 @@ class _CallScreenState extends State<CallScreen> {
           },
         ),
         _ControlButton(
-          icon: _isVideoOff
-              ? Icons.videocam_off_rounded
-              : Icons.videocam_rounded,
+          icon:
+              _isVideoOff ? Icons.videocam_off_rounded : Icons.videocam_rounded,
           label: _isVideoOff ? 'Start video' : 'Stop video',
           onTap: () async {
             await _callService.toggleVideo();
@@ -495,7 +516,8 @@ class _CallScreenState extends State<CallScreen> {
             height: 68,
             decoration:
                 const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
-            child: const Icon(Icons.call_end_rounded, color: Colors.white, size: 32),
+            child: const Icon(Icons.call_end_rounded,
+                color: Colors.white, size: 32),
           ),
         ),
         _ControlButton(
@@ -520,12 +542,17 @@ class _CallScreenState extends State<CallScreen> {
   @override
   void dispose() {
     CallScreen.isOnStack = false;
-    WakelockPlus.disable();
     _durationTimer?.cancel();
     if (!_minimized) {
+      // Call is ending — release the wakelock.
+      WakelockPlus.disable();
       SystemServices.onPipModeChanged = null;
       if (_isVideo) SystemServices.setPipEnabled(false).ignore();
       _callService.cleanup();
+    } else if (!_isVideo) {
+      // Minimised to the audio call bar — let the screen sleep again.
+      // (Video minimises to _CallVideoPip, which keeps the wakelock itself.)
+      WakelockPlus.disable();
     }
     super.dispose();
   }

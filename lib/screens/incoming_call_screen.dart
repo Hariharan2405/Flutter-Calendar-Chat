@@ -49,9 +49,7 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
     _startRingtone();
 
     // Listen directly on the call doc — auto-dismiss if caller cancels/ends
-    _callStatusSub = _callService
-        .watchCallDoc(widget.callId)
-        .listen((snap) {
+    _callStatusSub = _callService.watchCallDoc(widget.callId).listen((snap) {
       if (!snap.exists) {
         if (mounted) Navigator.pop(context);
         return;
@@ -154,28 +152,35 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
             ),
             const Spacer(),
             // Action buttons
-            Padding(
-              padding: const EdgeInsets.fromLTRB(40, 0, 40, 48),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  // Decline
-                  _CallActionButton(
-                    icon: Icons.call_end_rounded,
-                    color: Colors.red,
-                    label: 'Decline',
-                    onTap: _decline,
+            // Grouped, not spread across a tablet screen.
+            Align(
+              heightFactor: 1,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 520),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(40, 0, 40, 48),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      // Decline
+                      _CallActionButton(
+                        icon: Icons.call_end_rounded,
+                        color: Colors.red,
+                        label: 'Decline',
+                        onTap: _decline,
+                      ),
+                      // Accept
+                      _CallActionButton(
+                        icon: isVideo
+                            ? Icons.videocam_rounded
+                            : Icons.call_rounded,
+                        color: Colors.green,
+                        label: 'Accept',
+                        onTap: _accept,
+                      ),
+                    ],
                   ),
-                  // Accept
-                  _CallActionButton(
-                    icon: isVideo
-                        ? Icons.videocam_rounded
-                        : Icons.call_rounded,
-                    color: Colors.green,
-                    label: 'Accept',
-                    onTap: _accept,
-                  ),
-                ],
+                ),
               ),
             ),
           ],

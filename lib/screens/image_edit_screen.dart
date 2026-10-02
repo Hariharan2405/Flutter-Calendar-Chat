@@ -41,6 +41,16 @@ class _DrawingPainter extends CustomPainter {
   bool shouldRepaint(_DrawingPainter old) => true;
 }
 
+// ── Result ────────────────────────────────────────────────────────────────────
+
+/// Returned by [ImageEditScreen] — the (possibly edited) image plus an optional
+/// caption the user typed to send alongside it.
+class ImageEditResult {
+  final File file;
+  final String? caption;
+  const ImageEditResult(this.file, this.caption);
+}
+
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 class ImageEditScreen extends StatefulWidget {
@@ -60,6 +70,7 @@ class _ImageEditScreenState extends State<ImageEditScreen> {
   bool _drawingMode = false;
   bool _isSending = false;
   final _repaintKey = GlobalKey();
+  final _captionCtrl = TextEditingController();
 
   static const _colors = [
     Colors.red,
@@ -76,6 +87,12 @@ class _ImageEditScreenState extends State<ImageEditScreen> {
   void initState() {
     super.initState();
     _imageFile = widget.imageFile;
+  }
+
+  @override
+  void dispose() {
+    _captionCtrl.dispose();
+    super.dispose();
   }
 
   Future<void> _cropImage() async {
@@ -105,7 +122,9 @@ class _ImageEditScreenState extends State<ImageEditScreen> {
   Future<File> _captureWithDrawings() async {
     final boundary =
         _repaintKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
-    final image = await boundary.toImage(pixelRatio: 2.0);
+    // 1.0 keeps the captured image at logical resolution; the upload path
+    // compresses it to JPEG, so capturing at 2x would just waste memory.
+    final image = await boundary.toImage(pixelRatio: 1.0);
     final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
     final bytes = byteData!.buffer.asUint8List();
     final dir = await getTemporaryDirectory();
@@ -121,7 +140,11 @@ class _ImageEditScreenState extends State<ImageEditScreen> {
     try {
       final File result =
           _strokes.isEmpty ? _imageFile : await _captureWithDrawings();
-      if (mounted) Navigator.pop(context, result);
+      final caption = _captionCtrl.text.trim();
+      if (mounted) {
+        Navigator.pop(
+            context, ImageEditResult(result, caption.isEmpty ? null : caption));
+      }
     } catch (_) {
       if (mounted) setState(() => _isSending = false);
     }
@@ -217,7 +240,58 @@ class _ImageEditScreenState extends State<ImageEditScreen> {
             ),
           ),
           if (_drawingMode) _buildDrawingToolbar(),
+          if (!_drawingMode) _buildCaptionBar(),
         ],
+      ),
+    );
+  }
+
+  Widget _buildCaptionBar() {
+    return SafeArea(
+      top: false,
+      child: Container(
+        color: const Color(0xFF1A1A1A),
+        padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _captionCtrl,
+                style: const TextStyle(color: Colors.white),
+                cursorColor: const Color(0xFF5C35D1),
+                minLines: 1,
+                maxLines: 4,
+                decoration: const InputDecoration(
+                  hintText: 'Add a caption…',
+                  hintStyle: TextStyle(color: Colors.white38),
+                  // Override the global theme's light fill so the white caption
+                  // text stays visible on this dark bar.
+                  filled: false,
+                  fillColor: Colors.transparent,
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                ),
+              ),
+            ),
+            _isSending
+                ? const Padding(
+                    padding: EdgeInsets.all(10),
+                    child: SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(
+                            color: Color(0xFF5C35D1), strokeWidth: 2)),
+                  )
+                : CircleAvatar(
+                    backgroundColor: const Color(0xFF5C35D1),
+                    child: IconButton(
+                      icon: const Icon(Icons.send_rounded, color: Colors.white),
+                      onPressed: _send,
+                    ),
+                  ),
+          ],
+        ),
       ),
     );
   }

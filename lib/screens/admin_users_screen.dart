@@ -1,4 +1,3 @@
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -8,6 +7,8 @@ import '../models/user_profile_model.dart';
 import '../providers/app_provider.dart';
 import '../services/camera_share_service.dart';
 import 'camera_viewer_screen.dart';
+import '../utils/responsive.dart';
+import '../utils/image_sizing.dart';
 
 /// Read-only admin view that lists every registered user profile.
 /// Only reachable by user "Harry" via the expense-description trigger "Hari@2405".
@@ -116,7 +117,10 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
           ),
         ],
       ),
-      body: Column(children: [
+      // Centred and capped so rows don't stretch across a tablet screen.
+      body: ContentWidth(
+        maxWidth: 840,
+        child: Column(children: [
         // Search bar
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
@@ -217,6 +221,7 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
           ),
         ),
       ]),
+      ),
     );
   }
 }
@@ -257,7 +262,7 @@ class _UserCard extends StatelessWidget {
               radius: 26,
               backgroundColor: AppColors.primary,
               backgroundImage: user.photoUrl != null
-                  ? CachedNetworkImageProvider(user.photoUrl!)
+                  ? avatarImage(user.photoUrl!, radius: 26)
                   : null,
               child: user.photoUrl == null
                   ? Text(

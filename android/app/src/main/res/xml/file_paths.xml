@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- getTemporaryDirectory() → app cacheDir, where the updater saves the APK. -->
+    <cache-path name="cache" path="."/>
+    <external-cache-path name="ext_cache" path="."/>
+    <external-files-path name="ext_files" path="."/>
+</paths>

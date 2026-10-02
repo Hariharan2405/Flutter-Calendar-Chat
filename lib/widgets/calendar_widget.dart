@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:table_calendar/table_calendar.dart';
@@ -22,19 +24,33 @@ class CalendarWidget extends StatelessWidget {
           colors: [AppColors.primary, AppColors.primaryLight],
         ),
       ),
-      child: Column(
-        children: [
-          _buildHeader(context, provider),
-          _buildCalendar(context, provider),
-          _buildHolidayBanner(provider),
-        ],
+      // Everything scales off the space the calendar is actually given, so it
+      // fills a tablet (full-width or as a side pane) instead of leaving sparse
+      // cells, and shrinks rather than overflowing when height is tight. A
+      // phone in portrait lands on 1.0, so its layout is unchanged.
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // 400 x 400 is the phone-sized baseline this layout was tuned for
+          // (the content is ~380 tall at s = 1, so this leaves a little slack).
+          final s = math
+              .min(constraints.maxWidth / 400, constraints.maxHeight / 400)
+              .clamp(0.85, 1.6)
+              .toDouble();
+          return Column(
+            children: [
+              _buildHeader(context, provider, s),
+              _buildCalendar(context, provider, s),
+              _buildHolidayBanner(provider, s),
+            ],
+          );
+        },
       ),
     );
   }
 
-  Widget _buildHeader(BuildContext context, AppProvider provider) {
+  Widget _buildHeader(BuildContext context, AppProvider provider, double s) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      padding: EdgeInsets.fromLTRB(16 * s, 8 * s, 16 * s, 0),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
@@ -43,9 +59,9 @@ class CalendarWidget extends StatelessWidget {
             children: [
               Text(
                 DateFormat('MMMM yyyy').format(provider.focusedDate),
-                style: const TextStyle(
+                style: TextStyle(
                   color: Colors.white,
-                  fontSize: 18,
+                  fontSize: 18 * s,
                   fontWeight: FontWeight.w700,
                 ),
               ),
@@ -53,18 +69,18 @@ class CalendarWidget extends StatelessWidget {
                 'Tamil Nadu Calendar',
                 style: TextStyle(
                   color: Colors.white.withOpacity(0.75),
-                  fontSize: 12,
+                  fontSize: 12 * s,
                 ),
               ),
             ],
           ),
           Row(
             children: [
-              _legendDot(AppColors.holiday, 'Holiday'),
-              const SizedBox(width: 12),
-              _legendDot(AppColors.noteIndicator, 'Note'),
-              const SizedBox(width: 12),
-              _legendDot(AppColors.expenseIndicator, 'Expense'),
+              _legendDot(AppColors.holiday, 'Holiday', s),
+              SizedBox(width: 12 * s),
+              _legendDot(AppColors.noteIndicator, 'Note', s),
+              SizedBox(width: 12 * s),
+              _legendDot(AppColors.expenseIndicator, 'Expense', s),
             ],
           ),
         ],
@@ -72,21 +88,22 @@ class CalendarWidget extends StatelessWidget {
     );
   }
 
-  Widget _legendDot(Color color, String label) {
+  Widget _legendDot(Color color, String label, double s) {
     return Row(
       children: [
         Container(
-          width: 8,
-          height: 8,
+          width: 8 * s,
+          height: 8 * s,
           decoration: BoxDecoration(color: color, shape: BoxShape.circle),
         ),
-        const SizedBox(width: 4),
-        Text(label, style: const TextStyle(color: Colors.white70, fontSize: 10)),
+        SizedBox(width: 4 * s),
+        Text(label,
+            style: TextStyle(color: Colors.white70, fontSize: 10 * s)),
       ],
     );
   }
 
-  Widget _buildCalendar(BuildContext context, AppProvider provider) {
+  Widget _buildCalendar(BuildContext context, AppProvider provider, double s) {
     return TableCalendar(
       firstDay: DateTime(2024, 1, 1),
       lastDay: DateTime(2027, 12, 31),
@@ -99,13 +116,13 @@ class CalendarWidget extends StatelessWidget {
       onPageChanged: (focused) => provider.setFocusedDate(focused),
       calendarFormat: CalendarFormat.month,
       headerVisible: false,
-      daysOfWeekHeight: 28,
-      rowHeight: 44,
+      daysOfWeekHeight: 28 * s,
+      rowHeight: 44 * s,
       calendarStyle: CalendarStyle(
         outsideDaysVisible: false,
-        defaultTextStyle: const TextStyle(color: Colors.white, fontSize: 13),
-        weekendTextStyle: const TextStyle(color: Color(0xFFFFCDD2), fontSize: 13),
-        outsideTextStyle: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 13),
+        defaultTextStyle: TextStyle(color: Colors.white, fontSize: 13 * s),
+        weekendTextStyle: TextStyle(color: const Color(0xFFFFCDD2), fontSize: 13 * s),
+        outsideTextStyle: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 13 * s),
         selectedDecoration: BoxDecoration(
           color: Colors.white,
           shape: BoxShape.circle,
@@ -117,43 +134,43 @@ class CalendarWidget extends StatelessWidget {
             ),
           ],
         ),
-        selectedTextStyle: const TextStyle(
+        selectedTextStyle: TextStyle(
           color: AppColors.primary,
           fontWeight: FontWeight.bold,
-          fontSize: 13,
+          fontSize: 13 * s,
         ),
         todayDecoration: BoxDecoration(
           border: Border.all(color: Colors.white, width: 2),
           shape: BoxShape.circle,
         ),
-        todayTextStyle: const TextStyle(
+        todayTextStyle: TextStyle(
           color: Colors.white,
           fontWeight: FontWeight.bold,
-          fontSize: 13,
+          fontSize: 13 * s,
         ),
         markerDecoration: const BoxDecoration(
           color: Colors.transparent,
           shape: BoxShape.circle,
         ),
         markersMaxCount: 3,
-        cellMargin: const EdgeInsets.all(4),
+        cellMargin: EdgeInsets.all(4 * s),
       ),
       daysOfWeekStyle: DaysOfWeekStyle(
-        weekdayStyle: const TextStyle(
+        weekdayStyle: TextStyle(
           color: Colors.white70,
-          fontSize: 12,
+          fontSize: 12 * s,
           fontWeight: FontWeight.w600,
         ),
-        weekendStyle: const TextStyle(
-          color: Color(0xFFFFCDD2),
-          fontSize: 12,
+        weekendStyle: TextStyle(
+          color: const Color(0xFFFFCDD2),
+          fontSize: 12 * s,
           fontWeight: FontWeight.w600,
         ),
       ),
       calendarBuilders: CalendarBuilders(
-        defaultBuilder: (ctx, day, focusedDay) => _buildDay(ctx, day, provider, false),
-        todayBuilder: (ctx, day, focusedDay) => _buildDay(ctx, day, provider, false, isToday: true),
-        selectedBuilder: (ctx, day, focusedDay) => _buildDay(ctx, day, provider, true),
+        defaultBuilder: (ctx, day, focusedDay) => _buildDay(ctx, day, provider, false, s),
+        todayBuilder: (ctx, day, focusedDay) => _buildDay(ctx, day, provider, false, s, isToday: true),
+        selectedBuilder: (ctx, day, focusedDay) => _buildDay(ctx, day, provider, true, s),
       ),
     );
   }
@@ -162,7 +179,8 @@ class CalendarWidget extends StatelessWidget {
     BuildContext context,
     DateTime day,
     AppProvider provider,
-    bool isSelected, {
+    bool isSelected,
+    double s, {
     bool isToday = false,
   }) {
     final isHoliday = TamilNaduHolidays.isHoliday(day);
@@ -182,8 +200,8 @@ class CalendarWidget extends StatelessWidget {
 
     return Center(
       child: SizedBox(
-        width: 36,
-        height: 36,
+        width: 36 * s,
+        height: 36 * s,
         child: Container(
           decoration: isSelected
               ? BoxDecoration(
@@ -223,7 +241,7 @@ class CalendarWidget extends StatelessWidget {
                     fontWeight: isSelected || isToday
                         ? FontWeight.bold
                         : FontWeight.normal,
-                    fontSize: 13,
+                    fontSize: 13 * s,
                     height: 1,
                   ),
                 ),
@@ -231,15 +249,15 @@ class CalendarWidget extends StatelessWidget {
               // Indicator dots at the bottom
               if (hasIndicators)
                 Positioned(
-                  bottom: 4,
+                  bottom: 4 * s,
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       if (hasNote)
                         Container(
-                          width: 4,
-                          height: 4,
-                          margin: const EdgeInsets.symmetric(horizontal: 1),
+                          width: 4 * s,
+                          height: 4 * s,
+                          margin: EdgeInsets.symmetric(horizontal: 1 * s),
                           decoration: const BoxDecoration(
                             color: AppColors.noteIndicator,
                             shape: BoxShape.circle,
@@ -247,9 +265,9 @@ class CalendarWidget extends StatelessWidget {
                         ),
                       if (hasExpense)
                         Container(
-                          width: 4,
-                          height: 4,
-                          margin: const EdgeInsets.symmetric(horizontal: 1),
+                          width: 4 * s,
+                          height: 4 * s,
+                          margin: EdgeInsets.symmetric(horizontal: 1 * s),
                           decoration: const BoxDecoration(
                             color: AppColors.expenseIndicator,
                             shape: BoxShape.circle,
@@ -265,13 +283,13 @@ class CalendarWidget extends StatelessWidget {
     );
   }
 
-  Widget _buildHolidayBanner(AppProvider provider) {
+  Widget _buildHolidayBanner(AppProvider provider, double s) {
     final holidays = TamilNaduHolidays.getHolidaysForDate(provider.selectedDate);
-    if (holidays.isEmpty) return const SizedBox(height: 8);
+    if (holidays.isEmpty) return SizedBox(height: 8 * s);
 
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      margin: EdgeInsets.fromLTRB(12 * s, 4 * s, 12 * s, 8 * s),
+      padding: EdgeInsets.symmetric(horizontal: 12 * s, vertical: 6 * s),
       decoration: BoxDecoration(
         color: AppColors.holiday.withOpacity(0.2),
         borderRadius: BorderRadius.circular(20),
@@ -280,12 +298,12 @@ class CalendarWidget extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.celebration, color: Colors.white, size: 14),
-          const SizedBox(width: 6),
+          Icon(Icons.celebration, color: Colors.white, size: 14 * s),
+          SizedBox(width: 6 * s),
           Expanded(
             child: Text(
               holidays.map((h) => h.name).join(' • '),
-              style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w500),
+              style: TextStyle(color: Colors.white, fontSize: 11 * s, fontWeight: FontWeight.w500),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),

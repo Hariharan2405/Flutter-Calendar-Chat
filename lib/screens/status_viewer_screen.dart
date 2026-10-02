@@ -9,6 +9,9 @@ import '../constants/app_theme.dart';
 import '../models/status_model.dart';
 import '../services/chat_service.dart';
 import '../services/status_service.dart';
+import '../services/media_cache.dart';
+import '../services/video_thumbs.dart';
+import '../utils/image_sizing.dart';
 
 class StatusViewerScreen extends StatefulWidget {
   final List<UserStatuses> groups;
@@ -146,10 +149,26 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
       _statusService.markViewed(s.id, widget.currentUid);
     }
 
-    if (s.isVideo) {
-      final ctrl = VideoPlayerController.networkUrl(Uri.parse(s.mediaUrl));
+    if (s.isText) {
+      // Nothing to load — mark ready immediately so the progress bar starts
+      // rather than hanging on a spinner that will never resolve.
+      setState(() => _mediaLoaded = true);
+    } else if (s.isVideo) {
+      // Play from the locally cached/prefetched file when available so it
+      // starts instantly; otherwise stream from network and warm the cache.
+      VideoPlayerController ctrl;
+      final cached = await mediaCacheManager.getFileFromCache(s.mediaUrl);
+      if (cached != null) {
+        ctrl = VideoPlayerController.file(cached.file);
+      } else {
+        ctrl = VideoPlayerController.networkUrl(Uri.parse(s.mediaUrl));
+        mediaCacheManager.getSingleFile(s.mediaUrl).ignore();
+      }
       await ctrl.initialize();
-      if (!mounted) return;
+      if (!mounted) {
+        ctrl.dispose();
+        return;
+      }
       setState(() {
         _videoCtrl = ctrl;
         _mediaLoaded = true;
@@ -236,7 +255,9 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
             onPressed: () async {
               Navigator.pop(ctx);
               final id = _status.id;
-              await _statusService.deleteStatus(id);
+              final mediaUrl = _status.mediaUrl;
+              await _statusService.deleteStatus(id, mediaUrl: mediaUrl);
+              evictMediaFromCache([mediaUrl]);
               if (!mounted) return;
               final list = _mutableStatuses[_groupIdx];
               list.removeAt(_statusIdx);
@@ -288,17 +309,34 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
     if (text.trim().isEmpty || _sendingReply) return;
     setState(() => _sendingReply = true);
     try {
+      final status = _status;
+      final isVideo = status.type == 'video';
+      final isText = status.type == 'text';
+      // A status's photo or video is deleted after 24 hours, so the reply
+      // carries its own tiny copy rather than a link that will soon break.
+      // The media is already cached from being viewed, so this is quick.
+      final thumb = isText || status.mediaUrl.isEmpty
+          ? null
+          : await VideoThumbs.tinyPreview(
+              url: status.mediaUrl, isVideo: isVideo);
+      final label = isText
+          ? '💬 ${status.textBody ?? 'Status'}'
+          : status.caption?.isNotEmpty == true
+              ? '${isVideo ? '🎥' : '📷'} ${status.caption}'
+              : isVideo
+                  ? '🎥 Status'
+                  : '📷 Status';
       await widget.chatService.sendTextMessage(
         senderUid: widget.currentUid,
-        receiverUid: _status.uid,
+        receiverUid: status.uid,
         text: text.trim(),
-        replyToId: _status.id,
-        replyToText: _status.caption?.isNotEmpty == true
-            ? _status.caption
-            : '📷 Status',
-        replyToImageUrl:
-            _status.type == 'photo' ? _status.mediaUrl : null,
-        replyToSenderId: _status.uid,
+        replyToId: status.id,
+        replyToText: label,
+        replyToImageUrl: thumb == null && status.type == 'photo'
+            ? status.mediaUrl
+            : null,
+        replyToSenderId: status.uid,
+        replyToThumb: thumb,
       );
     } catch (_) {}
     if (mounted) {
@@ -344,8 +382,32 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
             _buildMedia(),
             _buildGradient(),
             _buildTapAreas(),
-            Positioned(top: 0, left: 0, right: 0, child: _buildTopBar()),
-            Positioned(bottom: 0, left: 0, right: 0, child: _buildBottomBar()),
+            // Media fills the screen, but on a tablet the progress bars,
+            // caption and reply box stay a readable width, centred.
+            // heightFactor: 1 keeps each bar its own height — a plain Center
+            // here would stretch it to the full screen.
+            Positioned(
+              top: 0, left: 0, right: 0,
+              child: Align(
+                alignment: Alignment.topCenter,
+                heightFactor: 1,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 640),
+                  child: _buildTopBar(),
+                ),
+              ),
+            ),
+            Positioned(
+              bottom: 0, left: 0, right: 0,
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                heightFactor: 1,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 640),
+                  child: _buildBottomBar(),
+                ),
+              ),
+            ),
             if (_showViewers && _isOwn) _buildViewerSheet(),
             // Sent-feedback toast
             if (_feedbackText != null)
@@ -383,7 +445,35 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
     );
   }
 
+  /// Mirrors the composer's sizing so a status looks the same when read as it
+  /// did when written.
+  static double _textStatusFontSize(String text) {
+    final len = text.characters.length;
+    if (len <= 30) return 34;
+    if (len <= 80) return 27;
+    if (len <= 160) return 22;
+    return 18;
+  }
+
   Widget _buildMedia() {
+    // A text status has nothing to fetch — it is its own content.
+    if (_status.isText) {
+      return Container(
+        color: Color(_status.backgroundColor ?? 0xFF5C35D1),
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Text(
+          _status.textBody ?? '',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: _textStatusFontSize(_status.textBody ?? ''),
+            fontWeight: FontWeight.w600,
+            height: 1.3,
+          ),
+        ),
+      );
+    }
     if (_status.isVideo) {
       if (!_mediaLoaded || _videoCtrl == null) {
         return const Center(
@@ -398,6 +488,7 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
     }
     return CachedNetworkImage(
       imageUrl: _status.mediaUrl,
+      cacheManager: mediaCacheManager,
       fit: BoxFit.contain,
       placeholder: (_, __) =>
           const Center(child: CircularProgressIndicator(color: Colors.white)),
@@ -491,7 +582,7 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
                     radius: 18,
                     backgroundColor: AppColors.primary,
                     backgroundImage: _groupInfo.photoUrl != null
-                        ? CachedNetworkImageProvider(_groupInfo.photoUrl!)
+                        ? avatarImage(_groupInfo.photoUrl!, radius: 18)
                         : null,
                     child: _groupInfo.photoUrl == null
                         ? Text(
@@ -809,7 +900,7 @@ class _StatusViewerScreenState extends State<StatusViewerScreen>
                           backgroundColor:
                               AppColors.primary.withValues(alpha: 0.5),
                           backgroundImage: photo != null
-                              ? CachedNetworkImageProvider(photo)
+                              ? avatarImage(photo, radius: 18)
                               : null,
                           child: photo == null
                               ? Text(
